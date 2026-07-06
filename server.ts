@@ -1,19 +1,27 @@
 /**
- * アーティスト名を検索し、そのアーティストを中心としたフィーチャリング
- * ネットワークをその場で構築して返すローカルAPIサーバー。
+ * Genius API を使い、アーティスト名を検索してそのアーティストを中心とした
+ * フィーチャリングネットワークを構築するローカルAPIサーバー。
  *
  * ── セットアップ ──────────────────────────────────────────────
- * npm install express cors
- * npm install -D @types/express @types/cors tsx dotenv
- *
- * .env に SPOTIFY_CLIENT_ID / SPOTIFY_CLIENT_SECRET を設定してから:
- *   npx tsx server.ts
- *
+ * 1. https://genius.com/api-clients で新しいAPI Clientを作成
+ * 2. 作成画面にある「Generate Access Token」で Client Access Token を発行
+ *    (Client ID / Secretではなく、この1本のトークンだけでOK。OAuthの
+ *     認可コードフローは不要)
+ * 3. .env に以下を設定
+ *      GENIUS_ACCESS_TOKEN=xxxx
+ * 4. npm install express cors
+ *    npm install -D @types/express @types/cors tsx dotenv
+ * 5. 実行: npx tsx server.ts
  * → http://localhost:3001/api/network?artist=名前 が使えるようになる
  *
- * フロントエンド(Vite dev server, 通常 http://localhost:5173)から
- * このAPIを叩く構成。Spotifyのクライアントシークレットはこのサーバー
- * プロセス内だけで使われ、ブラウザには一切渡らない。
+ * ── データの拾い方について ──────────────────────────────────
+ * Genius公式APIには「アーティスト検索」専用のエンドポイントがないため、
+ * /search で曲を検索し、その結果の primary_artist からアーティストIDを
+ * 特定する。またフィーチャリングだけの曲を直接一覧取得するエンドポイントも
+ * 無いため、「そのアーティスト本人名義の曲」を軸にして、そこに載っている
+ * 客演者(featured_artists)を拾う構成にしている。
+ * つまり「他人の曲にfeatureとしてだけ参加している回」は拾いきれない点に
+ * 留意してください(v1のスコープとして許容)。
  */
 
 import "dotenv/config";
@@ -24,42 +32,37 @@ const app = express();
 app.use(cors());
 
 const PORT = process.env.PORT ? Number(process.env.PORT) : 3001;
-const MARKET = "JP";
-// appears_on を含めると膨大になるアーティストがいるため、処理するアルバム数の上限
-const MAX_ALBUMS = 80;
+const GENIUS_BASE = "https://api.genius.com";
+
+// 処理する曲数の上限(客演の多い人気アーティストで待たされすぎないため)
+const MAX_SONGS = 150;
+// Genius側への配慮のため、曲詳細取得の間に入れる待機時間(ms)
+const REQUEST_INTERVAL_MS = 120;
 
 // ---------------------------------------------------------------------------
 // 型
 // ---------------------------------------------------------------------------
-interface TokenResponse {
-  access_token: string;
-  expires_in: number;
-}
-interface SpotifyArtist {
-  id: string;
+interface GeniusArtistRef {
+  id: number;
   name: string;
-  genres: string[];
-  popularity: number;
-  followers: { total: number };
+  is_verified?: boolean;
+  url?: string;
 }
-interface SpotifyArtistRef {
-  id: string;
-  name: string;
+
+interface GeniusSongSummary {
+  id: number;
+  title: string;
+  title_with_featured: string;
+  full_title: string;
+  primary_artist: GeniusArtistRef;
 }
-interface SpotifyTrack {
-  id: string;
-  name: string;
-  artists: SpotifyArtistRef[];
-}
-interface SpotifyAlbum {
-  id: string;
-  name: string;
-  release_date: string;
-  album_group?: string;
-}
-interface SpotifyPagedResponse<T> {
-  items: T[];
-  next: string | null;
+
+interface GeniusSongDetail {
+  id: number;
+  title: string;
+  primary_artist: GeniusArtistRef;
+  featured_artists: GeniusArtistRef[];
+  release_date_components?: { year?: number; month?: number; day?: number };
 }
 
 interface NetworkNode {
@@ -77,163 +80,133 @@ interface NetworkLink {
 }
 
 // ---------------------------------------------------------------------------
-// Spotify API ヘルパー(トークンはプロセス内でキャッシュして使い回す)
+// Genius API ヘルパー
 // ---------------------------------------------------------------------------
-let cachedToken: { value: string; expiresAt: number } | null = null;
-
-async function getAccessToken(): Promise<string> {
-  if (cachedToken && Date.now() < cachedToken.expiresAt) return cachedToken.value;
-
-  const clientId = process.env.SPOTIFY_CLIENT_ID;
-  const clientSecret = process.env.SPOTIFY_CLIENT_SECRET;
-  if (!clientId || !clientSecret) {
-    throw new Error("SPOTIFY_CLIENT_ID / SPOTIFY_CLIENT_SECRET が設定されていません(.env を確認してください)");
+function getToken(): string {
+  const token = process.env.GENIUS_ACCESS_TOKEN;
+  if (!token) {
+    throw new Error("GENIUS_ACCESS_TOKEN が設定されていません(.env を確認してください)");
   }
-  const basic = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
-  const res = await fetch("https://accounts.spotify.com/api/token", {
-    method: "POST",
-    headers: {
-      Authorization: `Basic ${basic}`,
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body: "grant_type=client_credentials",
-  });
-  if (!res.ok) throw new Error(`トークン取得失敗: ${res.status} ${await res.text()}`);
-  const json = (await res.json()) as TokenResponse;
-  cachedToken = { value: json.access_token, expiresAt: Date.now() + (json.expires_in - 60) * 1000 };
-  return cachedToken.value;
+  return token;
 }
 
-async function spotifyFetch<T>(url: string, token: string, retryCount = 0): Promise<T> {
-  const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-  if (res.status === 429 && retryCount < 5) {
-    const waitSec = Number(res.headers.get("retry-after") ?? "1");
-    await new Promise((r) => setTimeout(r, waitSec * 1000));
-    return spotifyFetch<T>(url, token, retryCount + 1);
+async function geniusFetch<T>(url: string, retryCount = 0): Promise<T> {
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${getToken()}` } });
+
+  if ((res.status === 429 || res.status >= 500) && retryCount < 4) {
+    const waitMs = 800 * (retryCount + 1);
+    await new Promise((r) => setTimeout(r, waitMs));
+    return geniusFetch<T>(url, retryCount + 1);
   }
-  if (!res.ok) throw new Error(`APIエラー ${res.status}: ${url}`);
+  if (!res.ok) {
+    throw new Error(`Genius APIエラー ${res.status}: ${url}`);
+  }
   return (await res.json()) as T;
 }
 
-async function searchArtist(name: string, token: string): Promise<SpotifyArtist | null> {
-  const url = `https://api.spotify.com/v1/search?q=${encodeURIComponent(
-    name
-  )}&type=artist&market=${MARKET}&limit=5`;
-  const data = await spotifyFetch<{ artists: SpotifyPagedResponse<SpotifyArtist> }>(url, token);
-  const exact = data.artists.items.find((a) => a.name === name);
-  return exact ?? data.artists.items[0] ?? null;
+async function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
-async function getAllAlbums(artistId: string, token: string): Promise<SpotifyAlbum[]> {
-  const albums: SpotifyAlbum[] = [];
-  let url: string | null =
-    `https://api.spotify.com/v1/artists/${artistId}/albums?include_groups=album,single,appears_on&market=${MARKET}&limit=50`;
-  while (url) {
-    const data: SpotifyPagedResponse<SpotifyAlbum> = await spotifyFetch(url, token);
-    albums.push(...data.items);
-    url = data.next;
-  }
-  return albums;
+async function searchArtist(name: string): Promise<GeniusArtistRef | null> {
+  const url = `${GENIUS_BASE}/search?q=${encodeURIComponent(name)}`;
+  const data = await geniusFetch<{ response: { hits: { result: GeniusSongSummary }[] } }>(url);
+
+  const candidates = data.response.hits.map((h) => h.result.primary_artist);
+  const exact = candidates.find((a) => a.name === name);
+  if (exact) return exact;
+
+  // 完全一致がなければ、名前に検索語が含まれる最初の候補を採用
+  const partial = candidates.find((a) => a.name.toLowerCase().includes(name.toLowerCase()));
+  return partial ?? candidates[0] ?? null;
 }
 
-async function getAlbumTracks(albumId: string, token: string): Promise<SpotifyTrack[]> {
-  const tracks: SpotifyTrack[] = [];
-  let url: string | null = `https://api.spotify.com/v1/albums/${albumId}/tracks?market=${MARKET}&limit=50`;
-  while (url) {
-    const data: SpotifyPagedResponse<SpotifyTrack> = await spotifyFetch(url, token);
-    tracks.push(...data.items);
-    url = data.next;
+async function getAllArtistSongs(artistId: number): Promise<GeniusSongSummary[]> {
+  const songs: GeniusSongSummary[] = [];
+  let page: number | null = 1;
+
+  while (page && songs.length < MAX_SONGS) {
+    const url = `${GENIUS_BASE}/artists/${artistId}/songs?per_page=50&page=${page}&sort=popularity`;
+    const data: { response: { songs: GeniusSongSummary[]; next_page: number | null } } = await geniusFetch(url);
+    songs.push(...data.response.songs);
+    page = data.response.next_page;
+    await sleep(REQUEST_INTERVAL_MS);
   }
-  return tracks;
+  return songs.slice(0, MAX_SONGS);
+}
+
+async function getSongDetail(songId: number): Promise<GeniusSongDetail> {
+  const url = `${GENIUS_BASE}/songs/${songId}?text_format=plain`;
+  const data = await geniusFetch<{ response: { song: GeniusSongDetail } }>(url);
+  return data.response.song;
 }
 
 // ---------------------------------------------------------------------------
 // センターアーティストを軸にネットワークを構築
 // ---------------------------------------------------------------------------
 async function buildNetworkForArtist(artistName: string) {
-  const token = await getAccessToken();
-
-  const center = await searchArtist(artistName, token);
+  const center = await searchArtist(artistName);
   if (!center) {
     const err = new Error(`アーティストが見つかりませんでした: ${artistName}`) as Error & { status?: number };
     err.status = 404;
     throw err;
   }
 
-  const albums = await getAllAlbums(center.id, token);
-  const targetAlbums = albums.slice(0, MAX_ALBUMS);
+  const allSongs = await getAllArtistSongs(center.id);
 
-  // 名前だけ分かっている段階のキャッシュ(詳細は後でまとめて取得)
-  const knownArtists = new Map<string, SpotifyArtist>();
-  knownArtists.set(center.id, center);
+  // タイトルに feat. 表記がある曲(=客演がいる可能性が高い曲)だけ詳細を取得し、
+  // Genius側へのリクエスト数を抑える
+  const candidateSongs = allSongs.filter((s) => s.title_with_featured !== s.title);
+
+  const knownArtists = new Map<string, GeniusArtistRef>();
+  knownArtists.set(String(center.id), center);
 
   const collabMap = new Map<string, { title: string; year: number }[]>();
-  const seenAlbumIds = new Set<string>();
-  let ownReleaseCount = 0;
 
-  for (const album of targetAlbums) {
-    if (album.album_group !== "appears_on") ownReleaseCount += 1;
-    if (seenAlbumIds.has(album.id)) continue;
-    seenAlbumIds.add(album.id);
+  for (const summary of candidateSongs) {
+    const detail = await getSongDetail(summary.id);
+    await sleep(REQUEST_INTERVAL_MS);
 
-    const tracks = await getAlbumTracks(album.id, token);
-    const year = Number((album.release_date || "0").slice(0, 4)) || 0;
+    if (!detail.featured_artists || detail.featured_artists.length === 0) continue;
 
-    for (const track of tracks) {
-      const onTrack = track.artists;
-      const centerPresent = onTrack.some((a) => a.id === center.id);
-      if (!centerPresent || onTrack.length < 2) continue;
+    const year = detail.release_date_components?.year ?? 0;
+    // センター本人 + 曲に載っている客演者、全員の組み合わせにエッジを張る
+    const onTrack: GeniusArtistRef[] = [detail.primary_artist, ...detail.featured_artists];
 
-      // このトラックに載っている全アーティストの組み合わせにエッジを張る
-      // (センター⇄共演者だけでなく、共演者同士の関係も同時に拾える)
-      for (let i = 0; i < onTrack.length; i++) {
-        for (let j = i + 1; j < onTrack.length; j++) {
-          const a = onTrack[i];
-          const b = onTrack[j];
-          const [x, y] = a.id < b.id ? [a, b] : [b, a];
-          const key = `${x.id}__${y.id}`;
-          const list = collabMap.get(key) ?? [];
-          if (!list.some((c) => c.title === track.name)) {
-            list.push({ title: track.name, year });
-          }
-          collabMap.set(key, list);
+    for (let i = 0; i < onTrack.length; i++) {
+      for (let j = i + 1; j < onTrack.length; j++) {
+        const a = onTrack[i];
+        const b = onTrack[j];
+        if (a.id === b.id) continue;
+        const [x, y] = a.id < b.id ? [a, b] : [b, a];
+        const key = `${x.id}__${y.id}`;
+        const list = collabMap.get(key) ?? [];
+        if (!list.some((c) => c.title === detail.title)) {
+          list.push({ title: detail.title, year });
+        }
+        collabMap.set(key, list);
 
-          for (const ref of [a, b]) {
-            if (!knownArtists.has(ref.id)) {
-              knownArtists.set(ref.id, {
-                id: ref.id,
-                name: ref.name,
-                genres: [],
-                popularity: 0,
-                followers: { total: 0 },
-              });
-            }
+        for (const ref of [a, b]) {
+          if (!knownArtists.has(String(ref.id))) {
+            knownArtists.set(String(ref.id), ref);
           }
         }
       }
     }
   }
 
-  // 登場した全アーティストのジャンル・人気度をまとめて取得(50件ずつ)
   const allIds = Array.from(knownArtists.keys());
-  for (let i = 0; i < allIds.length; i += 50) {
-    const chunk = allIds.slice(i, i + 50);
-    const url = `https://api.spotify.com/v1/artists?ids=${chunk.join(",")}`;
-    const data = await spotifyFetch<{ artists: (SpotifyArtist | null)[] }>(url, token);
-    for (const a of data.artists) {
-      if (a) knownArtists.set(a.id, a);
-    }
-  }
 
   const nodes: NetworkNode[] = allIds.map((id) => {
     const info = knownArtists.get(id)!;
+    const isCenter = Number(id) === center.id;
     return {
       id,
       name: info.name,
-      group: info.genres[0] ?? "ジャンル不明",
-      bio: `人気度 ${info.popularity}/100・フォロワー ${info.followers.total.toLocaleString()}人`,
-      releases: id === center.id ? ownReleaseCount : 0,
-      isCenter: id === center.id,
+      group: info.is_verified ? "認証アーティスト" : "アーティスト",
+      bio: info.url ? `Geniusページ: ${info.url}` : "",
+      releases: isCenter ? candidateSongs.length : 0,
+      isCenter,
     };
   });
 
@@ -242,7 +215,7 @@ async function buildNetworkForArtist(artistName: string) {
     return { source: sourceId, target: targetId, collabs: collabs.sort((p, q) => p.year - q.year) };
   });
 
-  return { nodes, links, centerId: center.id };
+  return { nodes, links, centerId: String(center.id) };
 }
 
 // ---------------------------------------------------------------------------
@@ -265,5 +238,5 @@ app.get("/api/network", async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Spotify network API を起動しました: http://localhost:${PORT}/api/network?artist=名前`);
+  console.log(`Genius network API を起動しました: http://localhost:${PORT}/api/network?artist=名前`);
 });
