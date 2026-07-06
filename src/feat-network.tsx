@@ -65,6 +65,17 @@ export default function FeatNetwork(): JSX.Element {
   const [data, setData] = useState<NetworkResponse | null>(null);
   const [status, setStatus] = useState<Status>("idle");
   const [errorMsg, setErrorMsg] = useState("");
+  // 現在(再)検索中のアーティスト名。ローディング表示に使う
+  const [searchingName, setSearchingName] = useState("");
+  // フィーチャリング相手リストで「曲一覧」をドリルダウン表示中のノードID
+  const [expandedCollabId, setExpandedCollabId] = useState<string | null>(null);
+
+  // シミュレーション本体とD3選択をrefで保持し、ハイライトの更新では
+  // グラフを作り直さない(=位置が弾け直さない)ようにする
+  const simulationRef = useRef<d3.Simulation<SimNode, SimLink> | null>(null);
+  const nodeSelRef = useRef<d3.Selection<SVGGElement, SimNode, SVGGElement, unknown> | null>(null);
+  const linkSelRef = useRef<d3.Selection<SVGLineElement, SimLink, SVGGElement, unknown> | null>(null);
+  const linksDataRef = useRef<SimLink[]>([]);
 
   async function runSearch(name: string) {
     const trimmed = name.trim();
@@ -73,6 +84,8 @@ export default function FeatNetwork(): JSX.Element {
     setErrorMsg("");
     setSelected(null);
     setHoveredLink(null);
+    setExpandedCollabId(null);
+    setSearchingName(trimmed);
     try {
       const res = await fetch(`${API_BASE}/api/network?artist=${encodeURIComponent(trimmed)}`);
       const json = await res.json();
@@ -83,6 +96,13 @@ export default function FeatNetwork(): JSX.Element {
       setErrorMsg(err instanceof Error ? err.message : String(err));
       setStatus("error");
     }
+  }
+
+  // フィーチャリング相手の名前をクリックしたときに、そのアーティストを
+  // 新しい検索対象として再検索する
+  function searchFromCollaborator(name: string) {
+    setQuery(name);
+    runSearch(name);
   }
 
   const groupColors = useMemo<Record<string, string>>(() => {
@@ -102,17 +122,25 @@ export default function FeatNetwork(): JSX.Element {
   }, [data]);
 
   useEffect(() => {
-    const resize = () => {
-      if (containerRef.current) {
-        const rect = containerRef.current.getBoundingClientRect();
-        setDims({ w: Math.max(320, rect.width), h: Math.max(360, rect.height) });
-      }
+    const el = containerRef.current;
+    if (!el) return;
+    const applySize = () => {
+      const rect = el.getBoundingClientRect();
+      setDims({ w: Math.max(320, rect.width), h: Math.max(360, rect.height) });
     };
-    resize();
-    window.addEventListener("resize", resize);
-    return () => window.removeEventListener("resize", resize);
+    applySize();
+    // window の resize イベントだけでなく、レイアウト由来のサイズ変化も
+    // 確実に拾うために ResizeObserver を使う(サイドバーの中身が伸びても
+    // グラフ側のcontainerサイズ自体は変わらないはずだが、念のため)
+    const observer = new ResizeObserver(applySize);
+    observer.observe(el);
+    return () => observer.disconnect();
   }, []);
 
+  // ---------------------------------------------------------------------------
+  // グラフ本体の構築:data / dims が変わったときだけ実行する
+  // (selected / hoveredLink はここに含めない = ハイライトではグラフを作り直さない)
+  // ---------------------------------------------------------------------------
   useEffect(() => {
     if (!data || !svgRef.current || data.nodes.length === 0) return;
     const { w, h } = dims;
@@ -132,36 +160,53 @@ export default function FeatNetwork(): JSX.Element {
 
     const nodes: SimNode[] = data.nodes.map((n) => ({ ...n }));
     const links: SimLink[] = data.links.map((l) => ({ ...l }));
+    linksDataRef.current = links;
 
-    // センターノードは初期位置を画面中央に固定して視覚的な軸にする
+    // 初期位置を中心アーティストを軸にした円状に配置しておく。
+    // ランダムな初期位置のまま force を回すと、最初の数秒間ノード同士が
+    // 重なりを解消しようと激しく弾け合って「揺れて気持ち悪い」原因になる。
     const centerNode = nodes.find((n) => n.id === data.centerId);
+    const others = nodes.filter((n) => n.id !== data.centerId);
+    const ringRadius = Math.min(w, h) * 0.32;
+    others.forEach((n, i) => {
+      const angle = (i / Math.max(1, others.length)) * Math.PI * 2;
+      n.x = w / 2 + ringRadius * Math.cos(angle);
+      n.y = h / 2 + ringRadius * Math.sin(angle);
+    });
     if (centerNode) {
+      centerNode.x = w / 2;
+      centerNode.y = h / 2;
+      // センターノードは常に画面中央に固定して視覚的な軸にする
       centerNode.fx = w / 2;
       centerNode.fy = h / 2;
     }
 
     const maxCollabs = d3.max(links, (l) => l.collabs.length) ?? 1;
-    const linkWidth = d3.scaleLinear().domain([1, maxCollabs]).range([1.5, 7]);
+    const linkWidth = d3.scaleLinear().domain([1, maxCollabs]).range([1.5, 6]);
     const maxDegree = d3.max(Object.values(degree)) ?? 1;
-    const nodeRadius = d3.scaleLinear().domain([1, maxDegree]).range([20, 40]);
+    const nodeRadius = d3.scaleLinear().domain([1, maxDegree]).range([20, 38]);
     const radiusFor = (d: SimNode) => (d.isCenter ? nodeRadius(degree[d.id] ?? 1) + 14 : nodeRadius(degree[d.id] ?? 1));
 
     const simulation = d3
       .forceSimulation<SimNode>(nodes)
+      .velocityDecay(0.55) // 減衰を強めにして振動を抑える(既定値0.4だと揺れやすい)
+      .alphaDecay(0.04) // 収束を速くして早めに静止させる(既定値0.0228)
       .force(
         "link",
         d3
           .forceLink<SimNode, SimLink>(links)
           .id((d) => d.id)
-          .distance((l) => 150 - l.collabs.length * 8)
-          .strength(0.4)
+          .distance((l) => 130 - Math.min(l.collabs.length, 5) * 8)
+          .strength(0.6)
       )
-      .force("charge", d3.forceManyBody().strength((d) => (d.isCenter ? -900 : -500)))
-      .force("center", d3.forceCenter(w / 2, h / 2))
+      .force("charge", d3.forceManyBody().strength((d) => (d.isCenter ? -500 : -260)).distanceMax(420))
+      .force("center", d3.forceCenter(w / 2, h / 2).strength(0.05))
       .force(
         "collision",
-        d3.forceCollide<SimNode>().radius((d) => radiusFor(d) + 20)
+        d3.forceCollide<SimNode>().radius((d) => radiusFor(d) + 16).strength(0.9)
       );
+
+    simulationRef.current = simulation;
 
     const defs = root.append("defs");
     const glow = defs
@@ -189,18 +234,20 @@ export default function FeatNetwork(): JSX.Element {
       .style("cursor", "pointer")
       .on("mouseenter", (_e, d) => setHoveredLink(d))
       .on("mouseleave", () => setHoveredLink(null));
+    linkSelRef.current = linkSel;
 
     const nodeSel = nodeGroup
       .selectAll<SVGGElement, SimNode>("g.node")
       .data(nodes)
       .join("g")
       .attr("class", "node")
+      .attr("transform", (d) => `translate(${d.x ?? 0},${d.y ?? 0})`)
       .style("cursor", "grab")
       .call(
         d3
           .drag<SVGGElement, SimNode>()
           .on("start", (event, d) => {
-            if (!event.active) simulation.alphaTarget(0.25).restart();
+            if (!event.active) simulation.alphaTarget(0.15).restart();
             d.fx = d.x;
             d.fy = d.y;
           })
@@ -220,10 +267,15 @@ export default function FeatNetwork(): JSX.Element {
             }
           })
       )
-      .on("click", (_e, d) => setSelected((prev) => (prev && prev.id === d.id ? null : d)));
+      .on("click", (_e, d) => {
+        setSelected((prev) => (prev && prev.id === d.id ? null : d));
+        setExpandedCollabId(null);
+      });
+    nodeSelRef.current = nodeSel;
 
     nodeSel
       .append("circle")
+      .attr("class", "ring")
       .attr("r", (d) => radiusFor(d) + 6)
       .attr("fill", "none")
       .attr("stroke", (d) => (d.isCenter ? CENTER_COLOR : groupColors[d.group] ?? "#888"))
@@ -232,6 +284,7 @@ export default function FeatNetwork(): JSX.Element {
 
     nodeSel
       .append("circle")
+      .attr("class", "core")
       .attr("r", (d) => radiusFor(d))
       .attr("fill", "#1C1620")
       .attr("stroke", (d) => (d.isCenter ? CENTER_COLOR : groupColors[d.group] ?? "#888"))
@@ -261,33 +314,6 @@ export default function FeatNetwork(): JSX.Element {
       .attr("font-size", 10.5)
       .text((d) => (d.isCenter ? "検索対象" : d.group));
 
-    function refreshHighlight() {
-      const activeId = selected?.id ?? null;
-      nodeSel.attr("opacity", (d) => {
-        if (!activeId) return 1;
-        if (d.id === activeId) return 1;
-        const connected = links.some(
-          (l) =>
-            (endpointId(l.source) === activeId && endpointId(l.target) === d.id) ||
-            (endpointId(l.target) === activeId && endpointId(l.source) === d.id)
-        );
-        return connected ? 1 : 0.2;
-      });
-
-      linkSel
-        .attr("stroke", (d) => {
-          if (hoveredLink === d) return "#E8B84B";
-          if (activeId && (endpointId(d.source) === activeId || endpointId(d.target) === activeId)) {
-            return "#E8B84B";
-          }
-          return "#3A3244";
-        })
-        .attr("opacity", (d) => {
-          if (!activeId) return hoveredLink === d ? 1 : 0.5;
-          return endpointId(d.source) === activeId || endpointId(d.target) === activeId ? 1 : 0.08;
-        });
-    }
-
     simulation.on("tick", () => {
       linkSel
         .attr("x1", (d) => (d.source as SimNode).x ?? 0)
@@ -295,22 +321,60 @@ export default function FeatNetwork(): JSX.Element {
         .attr("x2", (d) => (d.target as SimNode).x ?? 0)
         .attr("y2", (d) => (d.target as SimNode).y ?? 0);
       nodeSel.attr("transform", (d) => `translate(${d.x ?? 0},${d.y ?? 0})`);
-      refreshHighlight();
     });
 
-    refreshHighlight();
     return () => {
       simulation.stop();
+      simulationRef.current = null;
+      nodeSelRef.current = null;
+      linkSelRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data, dims, selected, hoveredLink, degree, groupColors]);
+  }, [data, dims]);
+
+  // ---------------------------------------------------------------------------
+  // ハイライトの更新だけを行う:selected / hoveredLink が変わったときのみ実行。
+  // 既存のノード・線の見た目(色・透明度)だけを書き換え、位置やシミュレーションには触れない。
+  // ---------------------------------------------------------------------------
+  useEffect(() => {
+    const nodeSel = nodeSelRef.current;
+    const linkSel = linkSelRef.current;
+    if (!nodeSel || !linkSel) return;
+
+    const activeId = selected?.id ?? null;
+    const links = linksDataRef.current;
+
+    nodeSel.attr("opacity", (d) => {
+      if (!activeId) return 1;
+      if (d.id === activeId) return 1;
+      const connected = links.some(
+        (l) =>
+          (endpointId(l.source) === activeId && endpointId(l.target) === d.id) ||
+          (endpointId(l.target) === activeId && endpointId(l.source) === d.id)
+      );
+      return connected ? 1 : 0.2;
+    });
+
+    linkSel
+      .attr("stroke", (d) => {
+        if (hoveredLink === d) return "#E8B84B";
+        if (activeId && (endpointId(d.source) === activeId || endpointId(d.target) === activeId)) {
+          return "#E8B84B";
+        }
+        return "#3A3244";
+      })
+      .attr("opacity", (d) => {
+        if (!activeId) return hoveredLink === d ? 1 : 0.5;
+        return endpointId(d.source) === activeId || endpointId(d.target) === activeId ? 1 : 0.08;
+      });
+  }, [selected, hoveredLink]);
 
   return (
     <div
       style={{
         width: "100%",
-        height: "100%",
-        minHeight: 680,
+        height: "100vh",
+        maxHeight: "100vh",
         background: "#120E14",
         color: "#F4EFE6",
         fontFamily: "'Zen Kaku Gothic New','Hiragino Kaku Gothic ProN','Noto Sans JP',sans-serif",
@@ -320,7 +384,7 @@ export default function FeatNetwork(): JSX.Element {
     >
       <div style={{ padding: "20px 24px 16px", borderBottom: "1px solid #241D2B" }}>
         <div style={{ fontSize: 11, letterSpacing: "0.18em", color: "#9C8FA6", fontWeight: 700, marginBottom: 4 }}>
-          FEATURING NETWORK — Spotify連携
+          FEATURING NETWORK — Genius連携
         </div>
         <div style={{ fontSize: 22, fontWeight: 800, letterSpacing: "0.01em", marginBottom: 14 }}>
           日本語ラップ フィーチャリング相関図
@@ -364,7 +428,7 @@ export default function FeatNetwork(): JSX.Element {
         </div>
       </div>
 
-      <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
+      <div style={{ display: "flex", flex: 1, minHeight: 0, overflow: "hidden" }}>
         <div ref={containerRef} style={{ flex: 1, minWidth: 0, position: "relative" }}>
           {status === "idle" && (
             <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", color: "#6E6478", fontSize: 13, textAlign: "center", padding: 24 }}>
@@ -372,8 +436,8 @@ export default function FeatNetwork(): JSX.Element {
             </div>
           )}
           {status === "loading" && (
-            <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", color: "#6E6478", fontSize: 13 }}>
-              Spotifyからデータを取得中…(アルバム数が多いアーティストは少し時間がかかります)
+            <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", color: "#6E6478", fontSize: 13, textAlign: "center", padding: 24 }}>
+              『{searchingName}』を検索中…(Geniusからデータを取得中。客演の多いアーティストは少し時間がかかります)
             </div>
           )}
           {status === "error" && (
@@ -413,7 +477,7 @@ export default function FeatNetwork(): JSX.Element {
         <div style={{ width: 280, flexShrink: 0, borderLeft: "1px solid #241D2B", padding: 20, overflowY: "auto" }}>
           {status === "ready" && !selected && !hoveredLink && (
             <div style={{ color: "#6E6478", fontSize: 13, lineHeight: 1.7 }}>
-              金色のノードが検索対象です。ノードをクリックすると詳細とコラボ相手を表示します。線にカーソルを合わせると楽曲情報が出ます。
+              金色のノードが検索対象です。ノードをクリックすると詳細とフィーチャリング相手を表示します。相手の名前をクリックするとそのアーティストで再検索、「▸ N曲」を押すと楽曲一覧を表示します。
             </div>
           )}
 
@@ -465,10 +529,61 @@ export default function FeatNetwork(): JSX.Element {
                   const otherId = l.source === selected.id ? l.target : l.source;
                   const other = data.nodes.find((n) => n.id === otherId);
                   if (!other) return null;
+                  const isExpanded = expandedCollabId === other.id;
                   return (
                     <div key={i} style={{ padding: "10px 0", borderBottom: "1px solid #241D2B", fontSize: 12.5 }}>
-                      <div style={{ fontWeight: 700, marginBottom: 3 }}>{other.name}</div>
-                      <div style={{ color: "#6E6478" }}>{l.collabs.length}曲でコラボ</div>
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                        <button
+                          onClick={() => searchFromCollaborator(other.name)}
+                          title={`${other.name}を新しい検索対象にする`}
+                          style={{
+                            background: "none",
+                            border: "none",
+                            padding: 0,
+                            fontWeight: 700,
+                            fontSize: 12.5,
+                            color: "#F4EFE6",
+                            textAlign: "left",
+                            cursor: "pointer",
+                            textDecoration: "underline",
+                            textDecorationColor: "#3A3244",
+                            textUnderlineOffset: 3,
+                          }}
+                        >
+                          {other.name}
+                        </button>
+                        <button
+                          onClick={() => setExpandedCollabId(isExpanded ? null : other.id)}
+                          style={{
+                            background: "none",
+                            border: "none",
+                            padding: "2px 6px",
+                            color: "#9C8FA6",
+                            fontSize: 11,
+                            cursor: "pointer",
+                            flexShrink: 0,
+                          }}
+                        >
+                          {isExpanded ? "▾ 閉じる" : `▸ ${l.collabs.length}曲`}
+                        </button>
+                      </div>
+                      {isExpanded && (
+                        <div style={{ marginTop: 8, paddingLeft: 4 }}>
+                          {l.collabs.map((c, ci) => (
+                            <div
+                              key={ci}
+                              style={{
+                                fontSize: 12,
+                                color: "#D8D0E0",
+                                padding: "5px 0",
+                                borderTop: ci === 0 ? "none" : "1px solid #241D2B",
+                              }}
+                            >
+                              {c.title} <span style={{ color: "#6E6478" }}>({c.year || "年不明"})</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   );
                 })}
