@@ -12,7 +12,8 @@
  * 4. npm install express cors
  *    npm install -D @types/express @types/cors tsx dotenv
  * 5. 実行: npx tsx server.ts
- * → http://localhost:3001/api/network?artist=名前 が使えるようになる
+ * → http://localhost:3001/api/network?artist=名前 でネットワーク構築
+ * → http://localhost:3001/api/search-artist?q=名前 で候補検索(軽量・高速)
  *
  * ── データの拾い方について ──────────────────────────────────
  * Genius公式APIには「アーティスト検索」専用のエンドポイントがないため、
@@ -60,6 +61,7 @@ interface GeniusSongSummary {
 interface GeniusSongDetail {
   id: number;
   title: string;
+  url: string;
   primary_artist: GeniusArtistRef;
   featured_artists: GeniusArtistRef[];
   release_date_components?: { year?: number; month?: number; day?: number };
@@ -76,7 +78,7 @@ interface NetworkNode {
 interface NetworkLink {
   source: string;
   target: string;
-  collabs: { title: string; year: number }[];
+  collabs: { title: string; year: number; url: string }[];
 }
 
 // ---------------------------------------------------------------------------
@@ -121,6 +123,89 @@ async function searchArtist(name: string): Promise<GeniusArtistRef | null> {
   return partial ?? candidates[0] ?? null;
 }
 
+// ---------------------------------------------------------------------------
+// アーティスト名そのものの曖昧検索(実験的)
+// Genius公式API(api.genius.com)には「アーティスト検索」が無いため、
+// Genius自身のサイト内検索が使っている非公式のエンドポイントを試す。
+// これは未文書化・非公式のため、レスポンス形式が変わったり塞がれたりする
+// 可能性がある。失敗した場合は下の songベースの方式に自動でフォールバックする。
+// ---------------------------------------------------------------------------
+async function searchArtistCandidatesDirect(name: string): Promise<GeniusArtistRef[] | null> {
+  try {
+    const url = `https://genius.com/api/search/artist?q=${encodeURIComponent(name)}`;
+    const res = await fetch(url, {
+      headers: {
+        // 非公式エンドポイントのため、ブラウザからのアクセスに近づけておく
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        Accept: "application/json",
+      },
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+
+    // レスポンス形式が複数パターンありうるため、両対応で拾う
+    const rawHits: any[] =
+      data?.response?.hits ??
+      data?.response?.sections?.flatMap((s: any) => s.hits ?? []) ??
+      [];
+
+    const seen = new Set<number>();
+    const candidates: GeniusArtistRef[] = [];
+    for (const hit of rawHits) {
+      const r = hit?.result ?? hit;
+      const id = r?.id;
+      const nm = r?.name;
+      if (!id || !nm || seen.has(id)) continue;
+      seen.add(id);
+      candidates.push({ id, name: nm, is_verified: r?.is_verified, url: r?.url });
+    }
+    return candidates.length > 0 ? candidates : null;
+  } catch {
+    return null;
+  }
+}
+
+// オートコンプリート用:候補となるアーティストを重複排除して複数返す(軽量・高速)
+async function searchArtistCandidates(name: string): Promise<GeniusArtistRef[]> {
+  // まず非公式のアーティスト直接検索を試す(名前そのものへの曖昧検索として精度が高い)
+  const direct = await searchArtistCandidatesDirect(name);
+  if (direct) return direct.slice(0, 8);
+
+  // 失敗した場合は、これまで通り「曲の検索結果からprimary_artistを拾う」方式にフォールバック
+  const url = `${GENIUS_BASE}/search?q=${encodeURIComponent(name)}`;
+  const data = await geniusFetch<{ response: { hits: { result: GeniusSongSummary }[] } }>(url);
+
+  const seen = new Set<number>();
+  const candidates: GeniusArtistRef[] = [];
+  for (const hit of data.response.hits) {
+    const a = hit.result.primary_artist;
+    if (seen.has(a.id)) continue;
+    seen.add(a.id);
+    candidates.push(a);
+  }
+
+  // Genius の /search は「曲」を検索語との関連度でランキングしたものなので、
+  // そのまま並べると「アーティスト名としては一致度が低いが、たまたま人気曲が
+  // ヒットした」ケースが上位に来てしまう(例:「漢」で検索すると
+  // 「漢 a.k.a. GAMI」のような連名クレジットが混ざって上位に出ることがある)。
+  // ここでアーティスト名とクエリ自体の一致度で並べ替える。
+  const q = name.trim().toLowerCase();
+  function matchTier(artistName: string): number {
+    const n = artistName.toLowerCase();
+    if (n === q) return 0; // 完全一致
+    if (n.startsWith(q)) return 1; // 前方一致
+    if (n.includes(q)) return 2; // 部分一致
+    return 3; // クエリを含まない(曲名側でのみヒットしたなど)
+  }
+
+  const sorted = candidates
+    .map((a, i) => ({ a, tier: matchTier(a.name), i }))
+    .sort((x, y) => (x.tier !== y.tier ? x.tier - y.tier : x.i - y.i))
+    .map((x) => x.a);
+
+  return sorted.slice(0, 8);
+}
+
 async function getAllArtistSongs(artistId: number): Promise<GeniusSongSummary[]> {
   const songs: GeniusSongSummary[] = [];
   let page: number | null = 1;
@@ -143,15 +228,9 @@ async function getSongDetail(songId: number): Promise<GeniusSongDetail> {
 
 // ---------------------------------------------------------------------------
 // センターアーティストを軸にネットワークを構築
+// (center はすでに解決済みのアーティスト。呼び出し側で名前検索/ID指定を行う)
 // ---------------------------------------------------------------------------
-async function buildNetworkForArtist(artistName: string) {
-  const center = await searchArtist(artistName);
-  if (!center) {
-    const err = new Error(`アーティストが見つかりませんでした: ${artistName}`) as Error & { status?: number };
-    err.status = 404;
-    throw err;
-  }
-
+async function buildNetworkForCenter(center: GeniusArtistRef) {
   const allSongs = await getAllArtistSongs(center.id);
 
   // タイトルに feat. 表記がある曲(=客演がいる可能性が高い曲)だけ詳細を取得し、
@@ -161,7 +240,7 @@ async function buildNetworkForArtist(artistName: string) {
   const knownArtists = new Map<string, GeniusArtistRef>();
   knownArtists.set(String(center.id), center);
 
-  const collabMap = new Map<string, { title: string; year: number }[]>();
+  const collabMap = new Map<string, { title: string; year: number; url: string }[]>();
 
   for (const summary of candidateSongs) {
     const detail = await getSongDetail(summary.id);
@@ -182,7 +261,7 @@ async function buildNetworkForArtist(artistName: string) {
         const key = `${x.id}__${y.id}`;
         const list = collabMap.get(key) ?? [];
         if (!list.some((c) => c.title === detail.title)) {
-          list.push({ title: detail.title, year });
+          list.push({ title: detail.title, year, url: detail.url });
         }
         collabMap.set(key, list);
 
@@ -221,14 +300,47 @@ async function buildNetworkForArtist(artistName: string) {
 // ---------------------------------------------------------------------------
 // エンドポイント
 // ---------------------------------------------------------------------------
-app.get("/api/network", async (req, res) => {
-  const artist = String(req.query.artist ?? "").trim();
-  if (!artist) {
-    res.status(400).json({ error: "artist パラメータが必要です" });
+app.get("/api/search-artist", async (req, res) => {
+  const q = String(req.query.q ?? "").trim();
+  if (!q) {
+    res.json({ candidates: [] });
     return;
   }
   try {
-    const result = await buildNetworkForArtist(artist);
+    const candidates = await searchArtistCandidates(q);
+    res.json({
+      candidates: candidates.map((a) => ({ id: a.id, name: a.name, isVerified: a.is_verified ?? false })),
+    });
+  } catch (err) {
+    const e = err as Error;
+    console.error(e);
+    res.status(500).json({ error: e.message ?? "内部エラー" });
+  }
+});
+
+app.get("/api/network", async (req, res) => {
+  const artistId = req.query.artistId ? Number(req.query.artistId) : null;
+  const artistName = String(req.query.artist ?? "").trim();
+
+  if (!artistId && !artistName) {
+    res.status(400).json({ error: "artist または artistId パラメータが必要です" });
+    return;
+  }
+
+  try {
+    let center: GeniusArtistRef | null;
+    if (artistId) {
+      // ランキング/候補リストから選択済み: 再検索なしでそのまま使う
+      center = { id: artistId, name: artistName || String(artistId) };
+    } else {
+      center = await searchArtist(artistName);
+    }
+    if (!center) {
+      const err = new Error(`アーティストが見つかりませんでした: ${artistName}`) as Error & { status?: number };
+      err.status = 404;
+      throw err;
+    }
+    const result = await buildNetworkForCenter(center);
     res.json(result);
   } catch (err) {
     const e = err as Error & { status?: number };

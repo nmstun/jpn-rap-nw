@@ -7,6 +7,7 @@ import * as d3 from "d3";
 interface Collab {
   title: string;
   year: number;
+  url: string;
 }
 
 interface ArtistNode {
@@ -70,6 +71,14 @@ export default function FeatNetwork(): JSX.Element {
   // フィーチャリング相手リストで「曲一覧」をドリルダウン表示中のノードID
   const [expandedCollabId, setExpandedCollabId] = useState<string | null>(null);
 
+  // あいまい検索の候補一覧(オートコンプリート)
+  const [candidates, setCandidates] = useState<{ id: number; name: string; isVerified: boolean }[]>([]);
+  const [showCandidates, setShowCandidates] = useState(false);
+  const [candidatesLoading, setCandidatesLoading] = useState(false);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 日本語入力(IME)の変換中かどうか。変換確定のEnterと検索実行のEnterを区別するために使う
+  const [isComposing, setIsComposing] = useState(false);
+
   // シミュレーション本体とD3選択をrefで保持し、ハイライトの更新では
   // グラフを作り直さない(=位置が弾け直さない)ようにする
   const simulationRef = useRef<d3.Simulation<SimNode, SimLink> | null>(null);
@@ -86,6 +95,8 @@ export default function FeatNetwork(): JSX.Element {
     setHoveredLink(null);
     setExpandedCollabId(null);
     setSearchingName(trimmed);
+    setData(null); // 検索開始と同時に前回のグラフを消す
+    setShowCandidates(false);
     try {
       const res = await fetch(`${API_BASE}/api/network?artist=${encodeURIComponent(trimmed)}`);
       const json = await res.json();
@@ -96,6 +107,69 @@ export default function FeatNetwork(): JSX.Element {
       setErrorMsg(err instanceof Error ? err.message : String(err));
       setStatus("error");
     }
+  }
+
+  // 候補から選択したとき: IDが分かっているのであいまい検索をスキップして直接構築する
+  // (Genius側へのリクエストが1回減り、狙ったアーティストと確実に一致する)
+  async function runSearchById(id: number, name: string) {
+    setStatus("loading");
+    setErrorMsg("");
+    setSelected(null);
+    setHoveredLink(null);
+    setExpandedCollabId(null);
+    setSearchingName(name);
+    setData(null);
+    setShowCandidates(false);
+    try {
+      const res = await fetch(`${API_BASE}/api/network?artistId=${id}&artist=${encodeURIComponent(name)}`);
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error ?? `取得に失敗しました (${res.status})`);
+      setData(json as NetworkResponse);
+      setStatus("ready");
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : String(err));
+      setStatus("error");
+    }
+  }
+
+  // 入力のたびに軽量な候補検索を投げる(300msデバウンス)。
+  // フルのネットワーク構築より圧倒的に軽いので、タイプ中に何度呼んでも問題ない
+  function handleQueryChange(value: string) {
+    setQuery(value);
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+
+    const trimmed = value.trim();
+    if (!trimmed) {
+      setCandidates([]);
+      setShowCandidates(false);
+      return;
+    }
+
+    debounceRef.current = setTimeout(async () => {
+      setCandidatesLoading(true);
+      try {
+        const res = await fetch(`${API_BASE}/api/search-artist?q=${encodeURIComponent(trimmed)}`);
+        const json = await res.json();
+        setCandidates(json.candidates ?? []);
+        setShowCandidates(true);
+      } catch {
+        setCandidates([]);
+      } finally {
+        setCandidatesLoading(false);
+      }
+    }, 300);
+  }
+
+  function openSongUrl(url: string) {
+    if (!url) return;
+    window.open(url, "_blank", "noopener,noreferrer");
+  }
+
+  function clearQuery() {
+    setQuery("");
+    setCandidates([]);
+    setShowCandidates(false);
+    if (debounceRef.current) clearTimeout(debounceRef.current);
   }
 
   // フィーチャリング相手の名前をクリックしたときに、そのアーティストを
@@ -121,6 +195,21 @@ export default function FeatNetwork(): JSX.Element {
     return d;
   }, [data]);
 
+  // 検索対象(センター)と直接コラボしているアーティストを、
+  // 一緒にやった曲数の多い順にランキングする
+  const ranking = useMemo<{ artist: ArtistNode; count: number }[]>(() => {
+    if (!data) return [];
+    const rows: { artist: ArtistNode; count: number }[] = [];
+    for (const l of data.links) {
+      if (l.source !== data.centerId && l.target !== data.centerId) continue;
+      const otherId = l.source === data.centerId ? l.target : l.source;
+      const other = data.nodes.find((n) => n.id === otherId);
+      if (!other) continue;
+      rows.push({ artist: other, count: l.collabs.length });
+    }
+    return rows.sort((a, b) => b.count - a.count);
+  }, [data]);
+
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
@@ -142,10 +231,19 @@ export default function FeatNetwork(): JSX.Element {
   // (selected / hoveredLink はここに含めない = ハイライトではグラフを作り直さない)
   // ---------------------------------------------------------------------------
   useEffect(() => {
-    if (!data || !svgRef.current || data.nodes.length === 0) return;
+    if (!svgRef.current) return;
+    const svg = d3.select<SVGSVGElement, unknown>(svgRef.current);
+
+    if (!data || data.nodes.length === 0) {
+      svg.selectAll("*").remove();
+      simulationRef.current?.stop();
+      simulationRef.current = null;
+      nodeSelRef.current = null;
+      linkSelRef.current = null;
+      return;
+    }
     const { w, h } = dims;
 
-    const svg = d3.select<SVGSVGElement, unknown>(svgRef.current);
     svg.selectAll("*").remove();
 
     const root = svg.attr("viewBox", `0 0 ${w} ${h}`).style("touch-action", "none");
@@ -390,25 +488,73 @@ export default function FeatNetwork(): JSX.Element {
           日本語ラップ フィーチャリング相関図
         </div>
 
-        <div style={{ display: "flex", gap: 8, maxWidth: 480 }}>
-          <input
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") runSearch(query);
-            }}
-            placeholder="アーティスト名で検索(例: 般若)"
-            style={{
-              flex: 1,
-              padding: "10px 14px",
-              borderRadius: 8,
-              border: "1px solid #3A3244",
-              background: "#1C1620",
-              color: "#F4EFE6",
-              fontSize: 14,
-              outline: "none",
-            }}
-          />
+        <div style={{ display: "flex", gap: 8, maxWidth: 480, position: "relative" }}>
+          <div style={{ position: "relative", flex: 1 }}>
+            <input
+              value={query}
+              onChange={(e) => handleQueryChange(e.target.value)}
+              onFocus={() => {
+                if (candidates.length > 0) setShowCandidates(true);
+              }}
+              onBlur={() => {
+                setTimeout(() => setShowCandidates(false), 150);
+              }}
+              onCompositionStart={() => setIsComposing(true)}
+              onCompositionEnd={() => setIsComposing(false)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  // IME変換確定のEnterでは検索を開始しない
+                  if (isComposing || e.nativeEvent.isComposing || e.keyCode === 229) return;
+                  runSearch(query);
+                }
+                if (e.key === "Escape") setShowCandidates(false);
+              }}
+              placeholder="アーティスト名で検索(例: 般若)"
+              style={{
+                width: "100%",
+                padding: "10px 34px 10px 14px",
+                borderRadius: 8,
+                border: "1px solid #3A3244",
+                background: "#1C1620",
+                color: "#F4EFE6",
+                fontSize: 14,
+                outline: "none",
+                boxSizing: "border-box",
+              }}
+            />
+            {query.length > 0 && (
+              <button
+                type="button"
+                onMouseDown={(e) => {
+                  // input の blur より先に処理する
+                  e.preventDefault();
+                  clearQuery();
+                }}
+                aria-label="検索文字をクリア"
+                style={{
+                  position: "absolute",
+                  right: 8,
+                  top: "50%",
+                  transform: "translateY(-50%)",
+                  width: 22,
+                  height: 22,
+                  borderRadius: "50%",
+                  border: "none",
+                  background: "#3A3244",
+                  color: "#F4EFE6",
+                  fontSize: 13,
+                  lineHeight: 1,
+                  cursor: "pointer",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  padding: 0,
+                }}
+              >
+                ×
+              </button>
+            )}
+          </div>
           <button
             onClick={() => runSearch(query)}
             disabled={status === "loading"}
@@ -425,10 +571,139 @@ export default function FeatNetwork(): JSX.Element {
           >
             {status === "loading" ? "検索中…" : "検索"}
           </button>
+
+          {showCandidates && (
+            <div
+              style={{
+                position: "absolute",
+                top: "calc(100% + 6px)",
+                left: 0,
+                width: 300,
+                background: "#1C1620",
+                border: "1px solid #3A3244",
+                borderRadius: 8,
+                boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
+                zIndex: 20,
+                overflow: "hidden",
+              }}
+            >
+              {candidatesLoading && (
+                <div style={{ padding: "10px 14px", fontSize: 12.5, color: "#6E6478" }}>候補を検索中…</div>
+              )}
+              {!candidatesLoading && candidates.length === 0 && (
+                <div style={{ padding: "10px 14px", fontSize: 12.5, color: "#6E6478" }}>
+                  候補が見つかりませんでした
+                </div>
+              )}
+              {!candidatesLoading &&
+                candidates.map((c) => (
+                  <button
+                    key={c.id}
+                    type="button"
+                    onMouseDown={(e) => {
+                      // input が blur するより先に処理する(クリックの取りこぼし防止)
+                      e.preventDefault();
+                      setQuery(c.name);
+                      runSearchById(c.id, c.name);
+                    }}
+                    style={{
+                      display: "block",
+                      width: "100%",
+                      textAlign: "left",
+                      padding: "10px 14px",
+                      background: "none",
+                      border: "none",
+                      borderBottom: "1px solid #241D2B",
+                      color: "#F4EFE6",
+                      fontSize: 13,
+                      cursor: "pointer",
+                    }}
+                    onMouseEnter={(e) => (e.currentTarget.style.background = "#241D2B")}
+                    onMouseLeave={(e) => (e.currentTarget.style.background = "none")}
+                  >
+                    {c.name}
+                    {c.isVerified && <span style={{ color: CENTER_COLOR, marginLeft: 6, fontSize: 11 }}>✓認証済み</span>}
+                  </button>
+                ))}
+            </div>
+          )}
         </div>
       </div>
 
       <div style={{ display: "flex", flex: 1, minHeight: 0, overflow: "hidden" }}>
+        {status === "ready" && data && (
+          <div
+            style={{
+              width: 230,
+              flexShrink: 0,
+              borderRight: "1px solid #241D2B",
+              padding: "20px 16px",
+              overflowY: "auto",
+            }}
+          >
+            <div style={{ fontSize: 10, letterSpacing: "0.12em", color: "#9C8FA6", fontWeight: 700, marginBottom: 12 }}>
+              客演数ランキング
+            </div>
+            {ranking.length === 0 && (
+              <div style={{ color: "#6E6478", fontSize: 12.5, lineHeight: 1.7 }}>
+                このアーティストの客演データが見つかりませんでした。
+              </div>
+            )}
+            {ranking.map((row, i) => {
+              const isActive = selected?.id === row.artist.id;
+              return (
+                <button
+                  key={row.artist.id}
+                  onClick={() => {
+                    setSelected(row.artist);
+                    setExpandedCollabId(null);
+                  }}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 10,
+                    width: "100%",
+                    padding: "8px 8px",
+                    marginBottom: 4,
+                    borderRadius: 6,
+                    border: "none",
+                    background: isActive ? "#241D2B" : "none",
+                    cursor: "pointer",
+                    textAlign: "left",
+                  }}
+                >
+                  <span
+                    style={{
+                      fontSize: 11,
+                      fontWeight: 700,
+                      color: i < 3 ? CENTER_COLOR : "#6E6478",
+                      width: 18,
+                      flexShrink: 0,
+                    }}
+                  >
+                    {i + 1}
+                  </span>
+                  <span
+                    style={{
+                      flex: 1,
+                      minWidth: 0,
+                      fontSize: 12.5,
+                      fontWeight: 700,
+                      color: "#F4EFE6",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {row.artist.name}
+                  </span>
+                  <span style={{ fontSize: 11, color: "#9C8FA6", flexShrink: 0 }}>{row.count}曲</span>
+                </button>
+              );
+            })}
+          </div>
+        )}
+
         <div ref={containerRef} style={{ flex: 1, minWidth: 0, position: "relative" }}>
           {status === "idle" && (
             <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", color: "#6E6478", fontSize: 13, textAlign: "center", padding: 24 }}>
@@ -477,7 +752,7 @@ export default function FeatNetwork(): JSX.Element {
         <div style={{ width: 280, flexShrink: 0, borderLeft: "1px solid #241D2B", padding: 20, overflowY: "auto" }}>
           {status === "ready" && !selected && !hoveredLink && (
             <div style={{ color: "#6E6478", fontSize: 13, lineHeight: 1.7 }}>
-              金色のノードが検索対象です。ノードをクリックすると詳細とフィーチャリング相手を表示します。相手の名前をクリックするとそのアーティストで再検索、「▸ N曲」を押すと楽曲一覧を表示します。
+              金色のノードが検索対象です。ノードをクリックすると詳細とフィーチャリング相手を表示します。相手の名前をクリックするとそのアーティストで再検索、「▸ N曲」で楽曲一覧を展開、曲名をクリックするとGeniusのページが新しいタブで開きます。
             </div>
           )}
 
@@ -492,11 +767,20 @@ export default function FeatNetwork(): JSX.Element {
               {hoveredLink.collabs.map((c, i) => (
                 <div
                   key={i}
+                  onClick={() => openSongUrl(c.url)}
+                  title={c.url ? "Geniusのページを開く" : undefined}
                   style={{
                     fontSize: 12.5,
                     color: "#D8D0E0",
                     padding: "6px 0",
                     borderBottom: i < hoveredLink.collabs.length - 1 ? "1px solid #241D2B" : "none",
+                    cursor: c.url ? "pointer" : "default",
+                  }}
+                  onMouseEnter={(e) => {
+                    if (c.url) e.currentTarget.style.color = CENTER_COLOR;
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.color = "#D8D0E0";
                   }}
                 >
                   {c.title} <span style={{ color: "#6E6478" }}>({c.year || "年不明"})</span>
@@ -519,7 +803,27 @@ export default function FeatNetwork(): JSX.Element {
                 {selected.isCenter ? "検索対象" : selected.group}
               </div>
               <div style={{ fontSize: 19, fontWeight: 800, marginBottom: 10 }}>{selected.name}</div>
-              <div style={{ fontSize: 12.5, lineHeight: 1.8, color: "#D8D0E0", marginBottom: 16 }}>{selected.bio}</div>
+              <div style={{ fontSize: 12.5, lineHeight: 1.8, color: "#D8D0E0", marginBottom: 12 }}>{selected.bio}</div>
+              {!selected.isCenter && (
+                <button
+                  onClick={() => searchFromCollaborator(selected.name)}
+                  style={{
+                    display: "block",
+                    width: "100%",
+                    marginBottom: 16,
+                    padding: "8px 12px",
+                    borderRadius: 6,
+                    border: `1px solid ${CENTER_COLOR}`,
+                    background: "none",
+                    color: CENTER_COLOR,
+                    fontSize: 12.5,
+                    fontWeight: 700,
+                    cursor: "pointer",
+                  }}
+                >
+                  🔍 {selected.name} を検索
+                </button>
+              )}
               <div style={{ fontSize: 10, letterSpacing: "0.12em", color: "#9C8FA6", marginBottom: 8 }}>
                 フィーチャリング相手
               </div>
@@ -572,11 +876,20 @@ export default function FeatNetwork(): JSX.Element {
                           {l.collabs.map((c, ci) => (
                             <div
                               key={ci}
+                              onClick={() => openSongUrl(c.url)}
+                              title={c.url ? "Geniusのページを開く" : undefined}
                               style={{
                                 fontSize: 12,
                                 color: "#D8D0E0",
                                 padding: "5px 0",
                                 borderTop: ci === 0 ? "none" : "1px solid #241D2B",
+                                cursor: c.url ? "pointer" : "default",
+                              }}
+                              onMouseEnter={(e) => {
+                                if (c.url) e.currentTarget.style.color = CENTER_COLOR;
+                              }}
+                              onMouseLeave={(e) => {
+                                e.currentTarget.style.color = "#D8D0E0";
                               }}
                             >
                               {c.title} <span style={{ color: "#6E6478" }}>({c.year || "年不明"})</span>
