@@ -1,32 +1,120 @@
-# React + TypeScript + Vite
+# jpn-rap-nw
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+このリポジトリは「日本語ラップのフィーチャリング相関図」を作る Web アプリです。
 
-Currently, two official plugins are available:
+公開済み（本番）
+- フロント（Vercel）: https://vercel.com/nanastun/jpn-rap-nw
+- バックエンド（Render）: https://jpn-rap-nw.onrender.com
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+主要機能
+- Genius API からアーティスト／楽曲情報を集め、中心アーティストを軸にフィーチャリングネットワークを構築・可視化します。
 
-## React Compiler
+## 目次
+- 概要
+- 技術スタック
+- ローカルでの起動方法
+- 環境変数
+- フロントのデプロイ（Vercel）
+- バックエンドのデプロイ（Render）
+- CORS とセキュリティ注意点
+- 長時間処理の扱い（キャンセル方法）
+- モバイル対応
+- トラブルシューティング
+- 開発者向けメモ
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## 概要
+フロント（Vite/React）とバックエンド（Express）を分離した構成です。フロントは静的にホスティング、バックエンドは常駐 Node サービスとして動作します。
 
-## Expanding the Oxlint configuration
+## 技術スタック
+- フロント: React + TypeScript + Vite
+- ビジュアライゼーション: D3
+- バックエンド: Node.js + Express
+- デプロイ: フロント→Vercel、バックエンド→Render
 
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
+## ローカルでの起動方法
+1. 依存をインストール
 
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+```bash
+npm install
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+2. `.env` を作成（`.env.example` を参照）
+
+3. フロントを起動
+
+```bash
+npm run dev
+```
+
+4. バックエンドを起動
+
+```bash
+npx tsx server.ts
+```
+
+ブラウザで `http://localhost:5173` にアクセスしてください。
+
+## 環境変数
+必須
+- `GENIUS_ACCESS_TOKEN` — Genius の Client Access Token
+
+運用/推奨
+- `LOG_LEVEL` — `info`（省略可）
+- `PORT` — Render 側で使用（例: `10000`）
+- `CORS_ALLOWED_ORIGINS` — バックエンドが受け付けるオリジン（カンマ区切り）。例:
+
+```
+CORS_ALLOWED_ORIGINS=https://vercel.com/nanastun/jpn-rap-nw
+```
+
+- フロント環境変数（Vercel）: `VITE_API_BASE_URL=https://jpn-rap-nw.onrender.com`
+
+`.env.example` にサンプルがあるので、それをコピーして値を設定してください。
+
+## フロントのデプロイ（Vercel）
+1. Vercel にリポジトリを接続
+2. 環境変数に `VITE_API_BASE_URL` を追加（値: `https://jpn-rap-nw.onrender.com`）
+3. デプロイ実行
+
+注意: Vercel プレビューはサブドメインが頻繁に変わるため、プレビューからバックエンドにアクセスする場合は Render 側の `CORS_ALLOWED_ORIGINS` に該当プレビュードメインを追加してください。
+
+## バックエンドのデプロイ（Render）
+1. Render の Web Service を作成し、リポジトリを接続
+2. Build コマンド: `npm install && npm run build`
+3. Start コマンド: `npx tsx server.ts`
+4. 環境変数を設定
+   - `GENIUS_ACCESS_TOKEN`
+   - `CORS_ALLOWED_ORIGINS=https://vercel.com/nanastun/jpn-rap-nw`（必要に応じてプレビュー用ドメインを追加）
+5. デプロイ/再起動
+
+## CORS とセキュリティ注意点
+- `CORS_ALLOWED_ORIGINS` はオリジン（スキーム + ドメイン）のみ指定します。ポートは不要です。
+- 開発やプレビューでサブドメインが変わる場合、`origin.endsWith('.vercel.app')` のような緩和を検討できます（セキュリティリスクを理解した上で）。
+- `GENIUS_ACCESS_TOKEN` は機密情報です。Render のシークレット機能を使って保存してください。
+
+## 長時間処理の扱い（キャンセル方法）
+- 人気アーティストのネットワーク構築は数十秒かかることがあります。フロントは `AbortController` による検索キャンセルを実装しています。
+- サーバー側での更なる改善: ジョブ化（ワーカーキュー）やタイムアウト設定の導入を検討してください。
+
+## モバイル対応
+- モバイルでは検索バーを縦並びにし、ランキングをチップ状の横スクロールに変更しています。操作性向上のためタップ領域を確保しています。
+
+## トラブルシューティング
+- `CORS blocked for origin: ...` → Render の `CORS_ALLOWED_ORIGINS` にフロントのオリジンを追加
+- `GENIUS_ACCESS_TOKEN` 未設定 → `.env` にトークンを追加してサーバー再起動
+- ビルドエラー → ローカルで `npm run build` を実行して原因を確認
+
+## 開発者向けメモ
+- 主要ファイル
+  - `server.ts` — バックエンド API エントリポイント
+  - `src/feat-network.tsx` — 可視化 UI と検索ロジック
+  - `src/main.tsx`, `src/App.tsx` — アプリエントリ
+
+## 改善案 / TODO
+- プレビュードメインの扱いを簡略化するためのロジック追加（例: `.vercel.app` 緩和）
+- 長時間処理のワーカー化とジョブ管理
+- ログ集約（pino など）
+
+---
+
+必要ならこの README をコミットしておきます。どのレベルまで詳細を入れるか指示ください（簡潔/詳細）。
