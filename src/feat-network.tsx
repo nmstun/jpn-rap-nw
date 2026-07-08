@@ -39,6 +39,12 @@ interface SimLink extends d3.SimulationLinkDatum<SimNode> {
   collabs: Collab[];
 }
 
+interface SearchCandidate {
+  id: number;
+  name: string;
+  isVerified: boolean;
+}
+
 // ローカルAPIサーバー(server.ts)のエンドポイント
 const API_BASE = "http://localhost:3001";
 
@@ -51,6 +57,42 @@ function endpointName(end: SimNode | string, nodes: ArtistNode[]): string {
 }
 function endpointId(end: SimNode | string): string {
   return typeof end === "string" ? end : end.id;
+}
+
+function openSongUrl(url: string) {
+  if (!url) return;
+  window.open(url, "_blank", "noopener,noreferrer");
+}
+
+// ホバーパネル・ドリルダウンの両方で使う楽曲リスト。
+// クリックでGeniusの該当ページを新しいタブで開く。
+function SongList({ collabs }: { collabs: Collab[] }) {
+  return (
+    <>
+      {collabs.map((c, i) => (
+        <div
+          key={i}
+          onClick={() => openSongUrl(c.url)}
+          title={c.url ? "Geniusのページを開く" : undefined}
+          style={{
+            fontSize: 12.5,
+            color: "#D8D0E0",
+            padding: "6px 0",
+            borderBottom: i < collabs.length - 1 ? "1px solid #241D2B" : "none",
+            cursor: c.url ? "pointer" : "default",
+          }}
+          onMouseEnter={(e) => {
+            if (c.url) e.currentTarget.style.color = CENTER_COLOR;
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.color = "#D8D0E0";
+          }}
+        >
+          {c.title} <span style={{ color: "#6E6478" }}>({c.year || "年不明"})</span>
+        </div>
+      ))}
+    </>
+  );
 }
 
 type Status = "idle" | "loading" | "ready" | "error";
@@ -72,7 +114,7 @@ export default function FeatNetwork(): JSX.Element {
   const [expandedCollabId, setExpandedCollabId] = useState<string | null>(null);
 
   // あいまい検索の候補一覧(オートコンプリート)
-  const [candidates, setCandidates] = useState<{ id: number; name: string; isVerified: boolean }[]>([]);
+  const [candidates, setCandidates] = useState<SearchCandidate[]>([]);
   const [showCandidates, setShowCandidates] = useState(false);
   const [candidatesLoading, setCandidatesLoading] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -86,50 +128,41 @@ export default function FeatNetwork(): JSX.Element {
   const linkSelRef = useRef<d3.Selection<SVGLineElement, SimLink, SVGGElement, unknown> | null>(null);
   const linksDataRef = useRef<SimLink[]>([]);
 
-  async function runSearch(name: string) {
-    const trimmed = name.trim();
-    if (!trimmed) return;
+  // runSearch(名前で検索) と runSearchById(候補選択で検索) は、状態リセットと
+  // フェッチ結果のハンドリングがほぼ同一なので共通化する。違うのはURLだけ。
+  async function performSearch(url: string, displayName: string) {
     setStatus("loading");
     setErrorMsg("");
     setSelected(null);
     setHoveredLink(null);
     setExpandedCollabId(null);
-    setSearchingName(trimmed);
+    setSearchingName(displayName);
     setData(null); // 検索開始と同時に前回のグラフを消す
     setShowCandidates(false);
     try {
-      const res = await fetch(`${API_BASE}/api/network?artist=${encodeURIComponent(trimmed)}`);
+      const res = await fetch(url);
       const json = await res.json();
       if (!res.ok) throw new Error(json.error ?? `取得に失敗しました (${res.status})`);
       setData(json as NetworkResponse);
       setStatus("ready");
     } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : String(err));
+      const message = err instanceof Error ? err.message : String(err);
+      console.error("[feat-network] search failed:", message);
+      setErrorMsg(message);
       setStatus("error");
     }
+  }
+
+  async function runSearch(name: string) {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    await performSearch(`${API_BASE}/api/network?artist=${encodeURIComponent(trimmed)}`, trimmed);
   }
 
   // 候補から選択したとき: IDが分かっているのであいまい検索をスキップして直接構築する
   // (Genius側へのリクエストが1回減り、狙ったアーティストと確実に一致する)
   async function runSearchById(id: number, name: string) {
-    setStatus("loading");
-    setErrorMsg("");
-    setSelected(null);
-    setHoveredLink(null);
-    setExpandedCollabId(null);
-    setSearchingName(name);
-    setData(null);
-    setShowCandidates(false);
-    try {
-      const res = await fetch(`${API_BASE}/api/network?artistId=${id}&artist=${encodeURIComponent(name)}`);
-      const json = await res.json();
-      if (!res.ok) throw new Error(json.error ?? `取得に失敗しました (${res.status})`);
-      setData(json as NetworkResponse);
-      setStatus("ready");
-    } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : String(err));
-      setStatus("error");
-    }
+    await performSearch(`${API_BASE}/api/network?artistId=${id}&artist=${encodeURIComponent(name)}`, name);
   }
 
   // 入力のたびに軽量な候補検索を投げる(300msデバウンス)。
@@ -152,17 +185,13 @@ export default function FeatNetwork(): JSX.Element {
         const json = await res.json();
         setCandidates(json.candidates ?? []);
         setShowCandidates(true);
-      } catch {
+      } catch (err) {
+        console.error("[feat-network] candidate search failed:", err);
         setCandidates([]);
       } finally {
         setCandidatesLoading(false);
       }
     }, 300);
-  }
-
-  function openSongUrl(url: string) {
-    if (!url) return;
-    window.open(url, "_blank", "noopener,noreferrer");
   }
 
   function clearQuery() {
@@ -259,6 +288,9 @@ export default function FeatNetwork(): JSX.Element {
     const nodes: SimNode[] = data.nodes.map((n) => ({ ...n }));
     const links: SimLink[] = data.links.map((l) => ({ ...l }));
     linksDataRef.current = links;
+
+    // ノードの色(センターかどうかで出し分け)。d3のattrコールバックから何度も参照する
+    const nodeStrokeColor = (d: SimNode) => (d.isCenter ? CENTER_COLOR : groupColors[d.group] ?? "#888");
 
     // 初期位置を中心アーティストを軸にした円状に配置しておく。
     // ランダムな初期位置のまま force を回すと、最初の数秒間ノード同士が
@@ -376,7 +408,7 @@ export default function FeatNetwork(): JSX.Element {
       .attr("class", "ring")
       .attr("r", (d) => radiusFor(d) + 6)
       .attr("fill", "none")
-      .attr("stroke", (d) => (d.isCenter ? CENTER_COLOR : groupColors[d.group] ?? "#888"))
+      .attr("stroke", nodeStrokeColor)
       .attr("stroke-width", (d) => (d.isCenter ? 1.5 : 1))
       .attr("opacity", (d) => (d.isCenter ? 0.55 : 0.35));
 
@@ -385,14 +417,14 @@ export default function FeatNetwork(): JSX.Element {
       .attr("class", "core")
       .attr("r", (d) => radiusFor(d))
       .attr("fill", "#1C1620")
-      .attr("stroke", (d) => (d.isCenter ? CENTER_COLOR : groupColors[d.group] ?? "#888"))
+      .attr("stroke", nodeStrokeColor)
       .attr("stroke-width", (d) => (d.isCenter ? 3.5 : 2.5))
       .attr("filter", "url(#glow)");
 
     nodeSel
       .append("circle")
       .attr("r", (d) => (d.isCenter ? 4.5 : 3))
-      .attr("fill", (d) => (d.isCenter ? CENTER_COLOR : groupColors[d.group] ?? "#888"));
+      .attr("fill", nodeStrokeColor);
 
     nodeSel
       .append("text")
@@ -764,28 +796,7 @@ export default function FeatNetwork(): JSX.Element {
               <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 8 }}>
                 {endpointName(hoveredLink.source, data.nodes)} × {endpointName(hoveredLink.target, data.nodes)}
               </div>
-              {hoveredLink.collabs.map((c, i) => (
-                <div
-                  key={i}
-                  onClick={() => openSongUrl(c.url)}
-                  title={c.url ? "Geniusのページを開く" : undefined}
-                  style={{
-                    fontSize: 12.5,
-                    color: "#D8D0E0",
-                    padding: "6px 0",
-                    borderBottom: i < hoveredLink.collabs.length - 1 ? "1px solid #241D2B" : "none",
-                    cursor: c.url ? "pointer" : "default",
-                  }}
-                  onMouseEnter={(e) => {
-                    if (c.url) e.currentTarget.style.color = CENTER_COLOR;
-                  }}
-                  onMouseLeave={(e) => {
-                    e.currentTarget.style.color = "#D8D0E0";
-                  }}
-                >
-                  {c.title} <span style={{ color: "#6E6478" }}>({c.year || "年不明"})</span>
-                </div>
-              ))}
+              <SongList collabs={hoveredLink.collabs} />
             </div>
           )}
 
@@ -873,28 +884,7 @@ export default function FeatNetwork(): JSX.Element {
                       </div>
                       {isExpanded && (
                         <div style={{ marginTop: 8, paddingLeft: 4 }}>
-                          {l.collabs.map((c, ci) => (
-                            <div
-                              key={ci}
-                              onClick={() => openSongUrl(c.url)}
-                              title={c.url ? "Geniusのページを開く" : undefined}
-                              style={{
-                                fontSize: 12,
-                                color: "#D8D0E0",
-                                padding: "5px 0",
-                                borderTop: ci === 0 ? "none" : "1px solid #241D2B",
-                                cursor: c.url ? "pointer" : "default",
-                              }}
-                              onMouseEnter={(e) => {
-                                if (c.url) e.currentTarget.style.color = CENTER_COLOR;
-                              }}
-                              onMouseLeave={(e) => {
-                                e.currentTarget.style.color = "#D8D0E0";
-                              }}
-                            >
-                              {c.title} <span style={{ color: "#6E6478" }}>({c.year || "年不明"})</span>
-                            </div>
-                          ))}
+                          <SongList collabs={l.collabs} />
                         </div>
                       )}
                     </div>
