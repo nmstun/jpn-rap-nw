@@ -118,8 +118,10 @@ export default function FeatNetwork(): JSX.Element {
   const [showCandidates, setShowCandidates] = useState(false);
   const [candidatesLoading, setCandidatesLoading] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
   // 日本語入力(IME)の変換中かどうか。変換確定のEnterと検索実行のEnterを区別するために使う
   const [isComposing, setIsComposing] = useState(false);
+  const [isMobile, setIsMobile] = useState(() => (typeof window !== "undefined" ? window.innerWidth < 900 : false));
 
   // シミュレーション本体とD3選択をrefで保持し、ハイライトの更新では
   // グラフを作り直さない(=位置が弾け直さない)ようにする
@@ -128,9 +130,28 @@ export default function FeatNetwork(): JSX.Element {
   const linkSelRef = useRef<d3.Selection<SVGLineElement, SimLink, SVGGElement, unknown> | null>(null);
   const linksDataRef = useRef<SimLink[]>([]);
 
+  function cancelActiveSearch() {
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = null;
+    setStatus("idle");
+    setSearchingName("");
+    setErrorMsg("");
+  }
+
+  useEffect(() => {
+    return () => {
+      abortControllerRef.current?.abort();
+      abortControllerRef.current = null;
+    };
+  }, []);
+
   // runSearch(名前で検索) と runSearchById(候補選択で検索) は、状態リセットと
   // フェッチ結果のハンドリングがほぼ同一なので共通化する。違うのはURLだけ。
   async function performSearch(url: string, displayName: string) {
+    abortControllerRef.current?.abort();
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
     setStatus("loading");
     setErrorMsg("");
     setSelected(null);
@@ -140,16 +161,24 @@ export default function FeatNetwork(): JSX.Element {
     setData(null); // 検索開始と同時に前回のグラフを消す
     setShowCandidates(false);
     try {
-      const res = await fetch(url);
+      const res = await fetch(url, { signal: controller.signal });
       const json = await res.json();
+      if (controller.signal.aborted) return;
       if (!res.ok) throw new Error(json.error ?? `取得に失敗しました (${res.status})`);
       setData(json as NetworkResponse);
       setStatus("ready");
     } catch (err) {
+      if (controller.signal.aborted) {
+        return;
+      }
       const message = err instanceof Error ? err.message : String(err);
       console.error("[feat-network] search failed:", message);
       setErrorMsg(message);
       setStatus("error");
+    } finally {
+      if (abortControllerRef.current === controller) {
+        abortControllerRef.current = null;
+      }
     }
   }
 
@@ -238,6 +267,13 @@ export default function FeatNetwork(): JSX.Element {
     }
     return rows.sort((a, b) => b.count - a.count);
   }, [data]);
+
+  useEffect(() => {
+    const updateIsMobile = () => setIsMobile(window.innerWidth < 900);
+    updateIsMobile();
+    window.addEventListener("resize", updateIsMobile);
+    return () => window.removeEventListener("resize", updateIsMobile);
+  }, []);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -503,24 +539,34 @@ export default function FeatNetwork(): JSX.Element {
     <div
       style={{
         width: "100%",
-        height: "100vh",
-        maxHeight: "100vh",
+        height: "100dvh",
+        minHeight: "100dvh",
+        maxHeight: "100dvh",
         background: "#120E14",
         color: "#F4EFE6",
         fontFamily: "'Zen Kaku Gothic New','Hiragino Kaku Gothic ProN','Noto Sans JP',sans-serif",
         display: "flex",
         flexDirection: "column",
+        overflow: "hidden",
       }}
     >
-      <div style={{ padding: "20px 24px 16px", borderBottom: "1px solid #241D2B" }}>
+      <div style={{ padding: isMobile ? "14px 14px 12px" : "20px 24px 16px", borderBottom: "1px solid #241D2B" }}>
         <div style={{ fontSize: 11, letterSpacing: "0.18em", color: "#9C8FA6", fontWeight: 700, marginBottom: 4 }}>
           FEATURING NETWORK — Genius連携
         </div>
-        <div style={{ fontSize: 22, fontWeight: 800, letterSpacing: "0.01em", marginBottom: 14 }}>
+        <div style={{ fontSize: isMobile ? 18 : 22, fontWeight: 800, letterSpacing: "0.01em", marginBottom: isMobile ? 10 : 14 }}>
           日本語ラップ フィーチャリング相関図
         </div>
 
-        <div style={{ display: "flex", gap: 8, maxWidth: 480, position: "relative" }}>
+        <div
+          style={{
+            display: "flex",
+            gap: 8,
+            maxWidth: 480,
+            position: "relative",
+            flexDirection: isMobile ? "column" : "row",
+          }}
+        >
           <div style={{ position: "relative", flex: 1 }}>
             <input
               value={query}
@@ -587,22 +633,46 @@ export default function FeatNetwork(): JSX.Element {
               </button>
             )}
           </div>
-          <button
-            onClick={() => runSearch(query)}
-            disabled={status === "loading"}
-            style={{
-              padding: "10px 20px",
-              borderRadius: 8,
-              border: "none",
-              background: status === "loading" ? "#3A3244" : CENTER_COLOR,
-              color: status === "loading" ? "#9C8FA6" : "#1C1620",
-              fontWeight: 700,
-              fontSize: 14,
-              cursor: status === "loading" ? "default" : "pointer",
-            }}
-          >
-            {status === "loading" ? "検索中…" : "検索"}
-          </button>
+          <div style={{ display: "flex", gap: 8, width: isMobile ? "100%" : "auto" }}>
+            <button
+              onClick={() => runSearch(query)}
+              disabled={status === "loading"}
+              style={{
+                padding: "10px 20px",
+                borderRadius: 8,
+                border: "none",
+                background: status === "loading" ? "#3A3244" : CENTER_COLOR,
+                color: status === "loading" ? "#9C8FA6" : "#1C1620",
+                fontWeight: 700,
+                fontSize: 14,
+                cursor: status === "loading" ? "default" : "pointer",
+                width: isMobile ? "100%" : "auto",
+                flex: isMobile ? 1 : "initial",
+              }}
+            >
+              {status === "loading" ? "検索中…" : "検索"}
+            </button>
+            {status === "loading" && (
+              <button
+                type="button"
+                onClick={cancelActiveSearch}
+                style={{
+                  padding: "10px 14px",
+                  borderRadius: 8,
+                  border: "1px solid #3A3244",
+                  background: "#1C1620",
+                  color: "#F4EFE6",
+                  fontWeight: 700,
+                  fontSize: 14,
+                  cursor: "pointer",
+                  width: isMobile ? "100%" : "auto",
+                  flex: isMobile ? 1 : "initial",
+                }}
+              >
+                キャンセル
+              </button>
+            )}
+          </div>
 
           {showCandidates && (
             <div
@@ -662,8 +732,8 @@ export default function FeatNetwork(): JSX.Element {
         </div>
       </div>
 
-      <div style={{ display: "flex", flex: 1, minHeight: 0, overflow: "hidden" }}>
-        {status === "ready" && data && (
+      <div style={{ display: "flex", flex: 1, minHeight: 0, overflow: isMobile ? "auto" : "hidden", flexDirection: isMobile ? "column" : "row" }}>
+        {status === "ready" && data && !isMobile && (
           <div
             style={{
               width: 230,
@@ -736,7 +806,45 @@ export default function FeatNetwork(): JSX.Element {
           </div>
         )}
 
-        <div ref={containerRef} style={{ flex: 1, minWidth: 0, position: "relative" }}>
+        {status === "ready" && data && isMobile && (
+          <div style={{ borderBottom: "1px solid #241D2B", padding: "10px 12px 8px", overflowX: "auto" }}>
+            <div style={{ fontSize: 10, letterSpacing: "0.12em", color: "#9C8FA6", fontWeight: 700, marginBottom: 8 }}>
+              客演数ランキング
+            </div>
+            <div style={{ display: "flex", gap: 8, overflowX: "auto", paddingBottom: 2 }}>
+              {ranking.map((row, i) => {
+                const isActive = selected?.id === row.artist.id;
+                return (
+                  <button
+                    key={row.artist.id}
+                    onClick={() => {
+                      setSelected(row.artist);
+                      setExpandedCollabId(null);
+                    }}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 8,
+                      padding: "7px 10px",
+                      borderRadius: 999,
+                      border: isActive ? "1px solid #E8B84B" : "1px solid #3A3244",
+                      background: isActive ? "#241D2B" : "#1C1620",
+                      color: "#F4EFE6",
+                      cursor: "pointer",
+                      whiteSpace: "nowrap",
+                      flexShrink: 0,
+                    }}
+                  >
+                    <span style={{ fontSize: 11, color: i < 3 ? CENTER_COLOR : "#9C8FA6" }}>{i + 1}</span>
+                    <span style={{ fontSize: 12.5, fontWeight: 700 }}>{row.artist.name}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        <div ref={containerRef} style={{ flex: 1, minWidth: 0, position: "relative", minHeight: isMobile ? 360 : 0 }}>
           {status === "idle" && (
             <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", color: "#6E6478", fontSize: 13, textAlign: "center", padding: 24 }}>
               アーティスト名を入力して検索すると、そのアーティストを中心にネットワークを表示します
@@ -781,7 +889,16 @@ export default function FeatNetwork(): JSX.Element {
           )}
         </div>
 
-        <div style={{ width: 280, flexShrink: 0, borderLeft: "1px solid #241D2B", padding: 20, overflowY: "auto" }}>
+        <div
+          style={{
+            width: isMobile ? "100%" : 280,
+            flexShrink: 0,
+            borderLeft: isMobile ? "none" : "1px solid #241D2B",
+            borderTop: isMobile ? "1px solid #241D2B" : "none",
+            padding: isMobile ? "14px 14px 20px" : 20,
+            overflowY: "auto",
+          }}
+        >
           {status === "ready" && !selected && !hoveredLink && (
             <div style={{ color: "#6E6478", fontSize: 13, lineHeight: 1.7 }}>
               金色のノードが検索対象です。ノードをクリックすると詳細とフィーチャリング相手を表示します。相手の名前をクリックするとそのアーティストで再検索、「▸ N曲」で楽曲一覧を展開、曲名をクリックするとGeniusのページが新しいタブで開きます。
