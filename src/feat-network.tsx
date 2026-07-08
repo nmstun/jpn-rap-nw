@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, useMemo } from "react";
+import { useEffect, useRef, useState, useMemo, type JSX } from "react";
 import * as d3 from "d3";
 
 // ---------------------------------------------------------------------------
@@ -45,8 +45,8 @@ interface SearchCandidate {
   isVerified: boolean;
 }
 
-// ローカルAPIサーバー(server.ts)のエンドポイント
-const API_BASE = "http://localhost:3001";
+// APIサーバー(server.ts)のベースURL。Viteのビルド時に環境変数から注入する
+const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? "http://localhost:3001").replace(/\/$/, "");
 
 const PALETTE = ["#FF3D6E", "#2DE0C6", "#E8B84B", "#B98CFF", "#5CC8FF", "#7BE07A", "#FF9F5C", "#6FA8FF"];
 const CENTER_COLOR = "#FFD24C";
@@ -329,7 +329,7 @@ export default function FeatNetwork(): JSX.Element {
           .distance((l) => 130 - Math.min(l.collabs.length, 5) * 8)
           .strength(0.6)
       )
-      .force("charge", d3.forceManyBody().strength((d) => (d.isCenter ? -500 : -260)).distanceMax(420))
+      .force("charge", d3.forceManyBody().strength((d) => ((d as SimNode).isCenter ? -500 : -260)).distanceMax(420))
       .force("center", d3.forceCenter(w / 2, h / 2).strength(0.05))
       .force(
         "collision",

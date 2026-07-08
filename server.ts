@@ -36,7 +36,28 @@ import cors from "cors";
 import { randomUUID } from "crypto";
 
 const app = express();
-app.use(cors());
+
+const CORS_ALLOWED_ORIGINS = (process.env.CORS_ALLOWED_ORIGINS ?? "http://localhost:5173,http://127.0.0.1:5173")
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      if (!origin) {
+        callback(null, true);
+        return;
+      }
+      if (CORS_ALLOWED_ORIGINS.includes(origin)) {
+        callback(null, true);
+        return;
+      }
+      callback(new Error(`CORS blocked for origin: ${origin}`));
+    },
+    credentials: true,
+  }),
+);
 
 const PORT = process.env.PORT ? Number(process.env.PORT) : 3001;
 const GENIUS_BASE = "https://api.genius.com";
