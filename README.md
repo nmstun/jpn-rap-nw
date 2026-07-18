@@ -104,6 +104,9 @@ CORS_ALLOWED_ORIGINS=https://vercel.com/nanastun/jpn-rap-nw
 - `GENIUS_ACCESS_TOKEN` 未設定 → `.env` にトークンを追加してサーバー再起動
 - ビルドエラー → ローカルで `npm run build` を実行して原因を確認
 
+## 依存関係の更新
+Renovate（`renovate.json`）により、依存パッケージの更新PRが週次で自動作成されます（実際に動かすにはGitHub Appとして[Renovate](https://github.com/apps/renovate)を本リポジトリにインストールしてください）。lockfile（`package-lock.json`）によりインストールされるバージョンは常に固定されているため、PRを確認してからマージする運用です。
+
 ## 開発者向けメモ
 - 主要ファイル
   - `server.ts` — バックエンド API エントリポイント
