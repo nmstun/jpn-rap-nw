@@ -88,7 +88,7 @@ function SongList({ collabs }: { collabs: Collab[] }) {
             e.currentTarget.style.color = "#D8D0E0";
           }}
         >
-          {c.title} <span style={{ color: "#6E6478" }}>({c.year || "年不明"})</span>
+          {c.title} <span style={{ color: "#9088A0" }}>({c.year || "年不明"})</span>
         </div>
       ))}
     </>
@@ -584,7 +584,7 @@ export default function FeatNetwork(): JSX.Element {
       }}
     >
       <div style={{ padding: isMobile ? "14px 14px 12px" : "20px 24px 16px", borderBottom: "1px solid #241D2B" }}>
-        <div style={{ fontSize: 11, letterSpacing: "0.18em", color: "#9C8FA6", fontWeight: 700, marginBottom: 4 }}>
+        <div style={{ fontSize: 12, letterSpacing: "0.18em", color: "#B0A4BE", fontWeight: 700, marginBottom: 4 }}>
           FEATURING NETWORK — Genius連携
         </div>
         <div style={{ fontSize: isMobile ? 18 : 22, fontWeight: 800, letterSpacing: "0.01em", marginBottom: isMobile ? 10 : 14 }}>
@@ -675,7 +675,7 @@ export default function FeatNetwork(): JSX.Element {
                 borderRadius: 8,
                 border: "none",
                 background: status === "loading" ? "#3A3244" : CENTER_COLOR,
-                color: status === "loading" ? "#9C8FA6" : "#1C1620",
+                color: status === "loading" ? "#B0A4BE" : "#1C1620",
                 fontWeight: 700,
                 fontSize: 14,
                 cursor: status === "loading" ? "default" : "pointer",
@@ -723,10 +723,10 @@ export default function FeatNetwork(): JSX.Element {
               }}
             >
               {candidatesLoading && (
-                <div style={{ padding: "10px 14px", fontSize: 12.5, color: "#6E6478" }}>候補を検索中…</div>
+                <div style={{ padding: "10px 14px", fontSize: 13, color: "#9088A0" }}>候補を検索中…</div>
               )}
               {!candidatesLoading && candidates.length === 0 && (
-                <div style={{ padding: "10px 14px", fontSize: 12.5, color: "#6E6478" }}>
+                <div style={{ padding: "10px 14px", fontSize: 13, color: "#9088A0" }}>
                   候補が見つかりませんでした
                 </div>
               )}
@@ -765,7 +765,7 @@ export default function FeatNetwork(): JSX.Element {
         </div>
 
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 10 }}>
-          <label htmlFor="max-nodes-select" style={{ fontSize: 12, color: "#9C8FA6" }}>
+          <label htmlFor="max-nodes-select" style={{ fontSize: 12.5, color: "#B0A4BE" }}>
             表示ノード数の上限
           </label>
           <select
@@ -791,12 +791,12 @@ export default function FeatNetwork(): JSX.Element {
             <option value={Infinity}>すべて</option>
           </select>
           {data && graphData && data.nodes.length > graphData.nodes.length && (
-            <span style={{ fontSize: 11.5, color: "#6E6478" }}>
+            <span style={{ fontSize: 12.5, color: "#9088A0" }}>
               (全{data.nodes.length}件中{graphData.nodes.length}件を表示)
             </span>
           )}
 
-          <label htmlFor="hops-select" style={{ fontSize: 12, color: "#9C8FA6", marginLeft: 8 }}>
+          <label htmlFor="hops-select" style={{ fontSize: 12.5, color: "#B0A4BE", marginLeft: 8 }}>
             hop数
           </label>
           <select
@@ -832,11 +832,11 @@ export default function FeatNetwork(): JSX.Element {
               overflowY: "auto",
             }}
           >
-            <div style={{ fontSize: 10, letterSpacing: "0.12em", color: "#9C8FA6", fontWeight: 700, marginBottom: 12 }}>
+            <div style={{ fontSize: 11, letterSpacing: "0.12em", color: "#B0A4BE", fontWeight: 700, marginBottom: 12 }}>
               客演数ランキング
             </div>
             {ranking.length === 0 && (
-              <div style={{ color: "#6E6478", fontSize: 12.5, lineHeight: 1.7 }}>
+              <div style={{ color: "#9088A0", fontSize: 13, lineHeight: 1.7 }}>
                 このアーティストの客演データが見つかりませんでした。
               </div>
             )}
@@ -865,9 +865,9 @@ export default function FeatNetwork(): JSX.Element {
                 >
                   <span
                     style={{
-                      fontSize: 11,
+                      fontSize: 12,
                       fontWeight: 700,
-                      color: i < 3 ? CENTER_COLOR : "#6E6478",
+                      color: i < 3 ? CENTER_COLOR : "#9088A0",
                       width: 18,
                       flexShrink: 0,
                     }}
@@ -888,7 +888,7 @@ export default function FeatNetwork(): JSX.Element {
                   >
                     {row.artist.name}
                   </span>
-                  <span style={{ fontSize: 11, color: "#9C8FA6", flexShrink: 0 }}>{row.count}曲</span>
+                  <span style={{ fontSize: 12, color: "#B0A4BE", flexShrink: 0 }}>{row.count}曲</span>
                 </button>
               );
             })}
@@ -897,7 +897,7 @@ export default function FeatNetwork(): JSX.Element {
 
         {status === "ready" && graphData && isMobile && (
           <div style={{ borderBottom: "1px solid #241D2B", padding: "10px 12px 8px", overflowX: "auto" }}>
-            <div style={{ fontSize: 10, letterSpacing: "0.12em", color: "#9C8FA6", fontWeight: 700, marginBottom: 8 }}>
+            <div style={{ fontSize: 11, letterSpacing: "0.12em", color: "#B0A4BE", fontWeight: 700, marginBottom: 8 }}>
               客演数ランキング
             </div>
             <div style={{ display: "flex", gap: 8, overflowX: "auto", paddingBottom: 2 }}>
@@ -924,7 +924,7 @@ export default function FeatNetwork(): JSX.Element {
                       flexShrink: 0,
                     }}
                   >
-                    <span style={{ fontSize: 11, color: i < 3 ? CENTER_COLOR : "#9C8FA6" }}>{i + 1}</span>
+                    <span style={{ fontSize: 12, color: i < 3 ? CENTER_COLOR : "#B0A4BE" }}>{i + 1}</span>
                     <span style={{ fontSize: 12.5, fontWeight: 700 }}>{row.artist.name}</span>
                   </button>
                 );
@@ -935,21 +935,21 @@ export default function FeatNetwork(): JSX.Element {
 
         <div ref={containerRef} style={{ flex: 1, minWidth: 0, position: "relative", minHeight: isMobile ? 360 : 0 }}>
           {status === "idle" && (
-            <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", color: "#6E6478", fontSize: 13, textAlign: "center", padding: 24 }}>
+            <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", color: "#9088A0", fontSize: 13.5, textAlign: "center", padding: 24 }}>
               アーティスト名を入力して検索すると、そのアーティストを中心にネットワークを表示します
             </div>
           )}
           {status === "loading" && (
-            <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", color: "#6E6478", fontSize: 13, textAlign: "center", padding: 24 }}>
+            <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", color: "#9088A0", fontSize: 13.5, textAlign: "center", padding: 24 }}>
               『{searchingName}』を検索中…(Geniusからデータを取得中。客演の多いアーティストは少し時間がかかります)
             </div>
           )}
           {status === "error" && (
             <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
-              <div style={{ maxWidth: 380, fontSize: 13, color: "#FF3D6E", lineHeight: 1.7, textAlign: "center" }}>
+              <div style={{ maxWidth: 380, fontSize: 13.5, color: "#FF3D6E", lineHeight: 1.7, textAlign: "center" }}>
                 {errorMsg}
                 <br />
-                <span style={{ color: "#6E6478" }}>server.ts(npx tsx server.ts)が起動しているか確認してください。</span>
+                <span style={{ color: "#9088A0" }}>server.ts(npx tsx server.ts)が起動しているか確認してください。</span>
               </div>
             </div>
           )}
@@ -960,8 +960,8 @@ export default function FeatNetwork(): JSX.Element {
                 position: "absolute",
                 bottom: 14,
                 left: 14,
-                fontSize: 11,
-                color: "#6E6478",
+                fontSize: 12,
+                color: "#9088A0",
                 display: "flex",
                 gap: 14,
                 flexWrap: "wrap",
@@ -989,14 +989,14 @@ export default function FeatNetwork(): JSX.Element {
           }}
         >
           {status === "ready" && !selected && !hoveredLink && (
-            <div style={{ color: "#6E6478", fontSize: 13, lineHeight: 1.7 }}>
+            <div style={{ color: "#9088A0", fontSize: 13.5, lineHeight: 1.7 }}>
               金色のノードが検索対象です。ノードをクリックすると詳細とフィーチャリング相手を表示します。相手の名前をクリックするとそのアーティストで再検索、「▸ N曲」で楽曲一覧を展開、曲名をクリックするとGeniusのページが新しいタブで開きます。
             </div>
           )}
 
           {graphData && hoveredLink && (
             <div style={{ marginBottom: 20 }}>
-              <div style={{ fontSize: 10, letterSpacing: "0.12em", color: "#9C8FA6", marginBottom: 6 }}>
+              <div style={{ fontSize: 11, letterSpacing: "0.12em", color: "#B0A4BE", marginBottom: 6 }}>
                 COLLABORATION
               </div>
               <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 8 }}>
@@ -1010,9 +1010,9 @@ export default function FeatNetwork(): JSX.Element {
             <div>
               <div
                 style={{
-                  fontSize: 10,
+                  fontSize: 11,
                   letterSpacing: "0.12em",
-                  color: selected.isCenter ? CENTER_COLOR : groupColors[selected.group] ?? "#9C8FA6",
+                  color: selected.isCenter ? CENTER_COLOR : groupColors[selected.group] ?? "#B0A4BE",
                   fontWeight: 700,
                   marginBottom: 6,
                 }}
@@ -1020,7 +1020,7 @@ export default function FeatNetwork(): JSX.Element {
                 {selected.isCenter ? "検索対象" : selected.group}
               </div>
               <div style={{ fontSize: 19, fontWeight: 800, marginBottom: 10 }}>{selected.name}</div>
-              <div style={{ fontSize: 12.5, lineHeight: 1.8, color: "#D8D0E0", marginBottom: 12 }}>{selected.bio}</div>
+              <div style={{ fontSize: 13, lineHeight: 1.8, color: "#D8D0E0", marginBottom: 12 }}>{selected.bio}</div>
               {!selected.isCenter && (
                 <button
                   onClick={() => searchFromCollaborator(selected.name)}
@@ -1041,7 +1041,7 @@ export default function FeatNetwork(): JSX.Element {
                   🔍 {selected.name} を検索
                 </button>
               )}
-              <div style={{ fontSize: 10, letterSpacing: "0.12em", color: "#9C8FA6", marginBottom: 8 }}>
+              <div style={{ fontSize: 11, letterSpacing: "0.12em", color: "#B0A4BE", marginBottom: 8 }}>
                 フィーチャリング相手
               </div>
               {graphData.links
@@ -1079,8 +1079,8 @@ export default function FeatNetwork(): JSX.Element {
                             background: "none",
                             border: "none",
                             padding: "2px 6px",
-                            color: "#9C8FA6",
-                            fontSize: 11,
+                            color: "#B0A4BE",
+                            fontSize: 12,
                             cursor: "pointer",
                             flexShrink: 0,
                           }}
