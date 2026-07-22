@@ -106,6 +106,8 @@ export default function FeatNetwork(): JSX.Element {
 
   const [query, setQuery] = useState("");
   const [data, setData] = useState<NetworkResponse | null>(null);
+  // 表示するノード数の上限(次数の多い順に間引く)。デフォルトは50件
+  const [maxNodes, setMaxNodes] = useState<number>(50);
   const [status, setStatus] = useState<Status>("idle");
   const [errorMsg, setErrorMsg] = useState("");
   // 現在(再)検索中のアーティスト名。ローディング表示に使う
@@ -237,36 +239,65 @@ export default function FeatNetwork(): JSX.Element {
     runSearch(name);
   }
 
+  // 表示ノード数の上限を適用したデータ。全体での次数(コラボ数)が多いノードを
+  // 優先して残し、検索対象(センター)は上限に関わらず必ず含める。
+  // 上限で除外されたノードに繋がるリンクも合わせて間引く。
+  const graphData = useMemo<NetworkResponse | null>(() => {
+    if (!data) return null;
+    if (data.nodes.length <= maxNodes) return data;
+
+    const degreeAll: Record<string, number> = Object.fromEntries(data.nodes.map((n) => [n.id, 0]));
+    data.links.forEach((l) => {
+      degreeAll[l.source] = (degreeAll[l.source] ?? 0) + 1;
+      degreeAll[l.target] = (degreeAll[l.target] ?? 0) + 1;
+    });
+
+    const center = data.nodes.find((n) => n.id === data.centerId);
+    const others = data.nodes
+      .filter((n) => n.id !== data.centerId)
+      .sort((a, b) => (degreeAll[b.id] ?? 0) - (degreeAll[a.id] ?? 0))
+      .slice(0, center ? maxNodes - 1 : maxNodes);
+
+    const visibleIds = new Set(others.map((n) => n.id));
+    if (center) visibleIds.add(center.id);
+
+    return {
+      nodes: data.nodes.filter((n) => visibleIds.has(n.id)),
+      links: data.links.filter((l) => visibleIds.has(l.source) && visibleIds.has(l.target)),
+      centerId: data.centerId,
+    };
+  }, [data, maxNodes]);
+
   const groupColors = useMemo<Record<string, string>>(() => {
-    if (!data) return {};
-    const groups = Array.from(new Set(data.nodes.filter((n) => !n.isCenter).map((n) => n.group)));
+    if (!graphData) return {};
+    const groups = Array.from(new Set(graphData.nodes.filter((n) => !n.isCenter).map((n) => n.group)));
     return Object.fromEntries(groups.map((g, i) => [g, PALETTE[i % PALETTE.length]]));
-  }, [data]);
+  }, [graphData]);
 
   const degree = useMemo<Record<string, number>>(() => {
-    if (!data) return {};
-    const d: Record<string, number> = Object.fromEntries(data.nodes.map((n) => [n.id, 0]));
-    data.links.forEach((l) => {
+    if (!graphData) return {};
+    const d: Record<string, number> = Object.fromEntries(graphData.nodes.map((n) => [n.id, 0]));
+    graphData.links.forEach((l) => {
       d[l.source] = (d[l.source] ?? 0) + 1;
       d[l.target] = (d[l.target] ?? 0) + 1;
     });
     return d;
-  }, [data]);
+  }, [graphData]);
 
   // 検索対象(センター)と直接コラボしているアーティストを、
   // 一緒にやった曲数の多い順にランキングする
   const ranking = useMemo<{ artist: ArtistNode; count: number }[]>(() => {
-    if (!data) return [];
+    if (!graphData) return [];
     const rows: { artist: ArtistNode; count: number }[] = [];
-    for (const l of data.links) {
-      if (l.source !== data.centerId && l.target !== data.centerId) continue;
-      const otherId = l.source === data.centerId ? l.target : l.source;
-      const other = data.nodes.find((n) => n.id === otherId);
+    for (const l of graphData.links) {
+      if (l.source !== graphData.centerId && l.target !== graphData.centerId) continue;
+      const otherId = l.source === graphData.centerId ? l.target : l.source;
+      const other = graphData.nodes.find((n) => n.id === otherId);
       if (!other) continue;
       rows.push({ artist: other, count: l.collabs.length });
     }
     return rows.sort((a, b) => b.count - a.count);
-  }, [data]);
+  }, [graphData]);
 
   useEffect(() => {
     const updateIsMobile = () => setIsMobile(window.innerWidth < 900);
@@ -299,7 +330,7 @@ export default function FeatNetwork(): JSX.Element {
     if (!svgRef.current) return;
     const svg = d3.select<SVGSVGElement, unknown>(svgRef.current);
 
-    if (!data || data.nodes.length === 0) {
+    if (!graphData || graphData.nodes.length === 0) {
       svg.selectAll("*").remove();
       simulationRef.current?.stop();
       simulationRef.current = null;
@@ -321,8 +352,8 @@ export default function FeatNetwork(): JSX.Element {
         .on("zoom", (event) => zoomLayer.attr("transform", event.transform.toString()))
     );
 
-    const nodes: SimNode[] = data.nodes.map((n) => ({ ...n }));
-    const links: SimLink[] = data.links.map((l) => ({ ...l }));
+    const nodes: SimNode[] = graphData.nodes.map((n) => ({ ...n }));
+    const links: SimLink[] = graphData.links.map((l) => ({ ...l }));
     linksDataRef.current = links;
 
     // ノードの色(センターかどうかで出し分け)。d3のattrコールバックから何度も参照する
@@ -331,8 +362,8 @@ export default function FeatNetwork(): JSX.Element {
     // 初期位置を中心アーティストを軸にした円状に配置しておく。
     // ランダムな初期位置のまま force を回すと、最初の数秒間ノード同士が
     // 重なりを解消しようと激しく弾け合って「揺れて気持ち悪い」原因になる。
-    const centerNode = nodes.find((n) => n.id === data.centerId);
-    const others = nodes.filter((n) => n.id !== data.centerId);
+    const centerNode = nodes.find((n) => n.id === graphData.centerId);
+    const others = nodes.filter((n) => n.id !== graphData.centerId);
     const ringRadius = Math.min(w, h) * 0.32;
     others.forEach((n, i) => {
       const angle = (i / Math.max(1, others.length)) * Math.PI * 2;
@@ -496,7 +527,7 @@ export default function FeatNetwork(): JSX.Element {
       linkSelRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data, dims]);
+  }, [graphData, dims]);
 
   // ---------------------------------------------------------------------------
   // ハイライトの更新だけを行う:selected / hoveredLink が変わったときのみ実行。
@@ -730,10 +761,43 @@ export default function FeatNetwork(): JSX.Element {
             </div>
           )}
         </div>
+
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 10 }}>
+          <label htmlFor="max-nodes-select" style={{ fontSize: 12, color: "#9C8FA6" }}>
+            表示ノード数の上限
+          </label>
+          <select
+            id="max-nodes-select"
+            value={maxNodes}
+            onChange={(e) => setMaxNodes(Number(e.target.value))}
+            style={{
+              padding: "5px 8px",
+              borderRadius: 6,
+              border: "1px solid #3A3244",
+              background: "#1C1620",
+              color: "#F4EFE6",
+              fontSize: 12.5,
+              outline: "none",
+            }}
+          >
+            <option value={10}>10</option>
+            <option value={20}>20</option>
+            <option value={30}>30</option>
+            <option value={50}>50</option>
+            <option value={100}>100</option>
+            <option value={200}>200</option>
+            <option value={Infinity}>すべて</option>
+          </select>
+          {data && graphData && data.nodes.length > graphData.nodes.length && (
+            <span style={{ fontSize: 11.5, color: "#6E6478" }}>
+              (全{data.nodes.length}件中{graphData.nodes.length}件を表示)
+            </span>
+          )}
+        </div>
       </div>
 
       <div style={{ display: "flex", flex: 1, minHeight: 0, overflow: isMobile ? "auto" : "hidden", flexDirection: isMobile ? "column" : "row" }}>
-        {status === "ready" && data && !isMobile && (
+        {status === "ready" && graphData && !isMobile && (
           <div
             style={{
               width: 230,
@@ -806,7 +870,7 @@ export default function FeatNetwork(): JSX.Element {
           </div>
         )}
 
-        {status === "ready" && data && isMobile && (
+        {status === "ready" && graphData && isMobile && (
           <div style={{ borderBottom: "1px solid #241D2B", padding: "10px 12px 8px", overflowX: "auto" }}>
             <div style={{ fontSize: 10, letterSpacing: "0.12em", color: "#9C8FA6", fontWeight: 700, marginBottom: 8 }}>
               客演数ランキング
@@ -905,19 +969,19 @@ export default function FeatNetwork(): JSX.Element {
             </div>
           )}
 
-          {data && hoveredLink && (
+          {graphData && hoveredLink && (
             <div style={{ marginBottom: 20 }}>
               <div style={{ fontSize: 10, letterSpacing: "0.12em", color: "#9C8FA6", marginBottom: 6 }}>
                 COLLABORATION
               </div>
               <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 8 }}>
-                {endpointName(hoveredLink.source, data.nodes)} × {endpointName(hoveredLink.target, data.nodes)}
+                {endpointName(hoveredLink.source, graphData.nodes)} × {endpointName(hoveredLink.target, graphData.nodes)}
               </div>
               <SongList collabs={hoveredLink.collabs} />
             </div>
           )}
 
-          {data && selected && (
+          {graphData && selected && (
             <div>
               <div
                 style={{
@@ -955,11 +1019,11 @@ export default function FeatNetwork(): JSX.Element {
               <div style={{ fontSize: 10, letterSpacing: "0.12em", color: "#9C8FA6", marginBottom: 8 }}>
                 フィーチャリング相手
               </div>
-              {data.links
+              {graphData.links
                 .filter((l) => l.source === selected.id || l.target === selected.id)
                 .map((l, i) => {
                   const otherId = l.source === selected.id ? l.target : l.source;
-                  const other = data.nodes.find((n) => n.id === otherId);
+                  const other = graphData.nodes.find((n) => n.id === otherId);
                   if (!other) return null;
                   const isExpanded = expandedCollabId === other.id;
                   return (
