@@ -108,6 +108,8 @@ export default function FeatNetwork(): JSX.Element {
   const [data, setData] = useState<NetworkResponse | null>(null);
   // 表示するノード数の上限(次数の多い順に間引く)。デフォルトは50件
   const [maxNodes, setMaxNodes] = useState<number>(50);
+  // 何hop先の客演相手まで展開するか(1=直接客演相手のみ)。デフォルトは2
+  const [hops, setHops] = useState<number>(2);
   const [status, setStatus] = useState<Status>("idle");
   const [errorMsg, setErrorMsg] = useState("");
   // 現在(再)検索中のアーティスト名。ローディング表示に使う
@@ -187,13 +189,13 @@ export default function FeatNetwork(): JSX.Element {
   async function runSearch(name: string) {
     const trimmed = name.trim();
     if (!trimmed) return;
-    await performSearch(`${API_BASE}/api/network?artist=${encodeURIComponent(trimmed)}`, trimmed);
+    await performSearch(`${API_BASE}/api/network?artist=${encodeURIComponent(trimmed)}&hops=${hops}`, trimmed);
   }
 
   // 候補から選択したとき: IDが分かっているのであいまい検索をスキップして直接構築する
   // (Genius側へのリクエストが1回減り、狙ったアーティストと確実に一致する)
   async function runSearchById(id: number, name: string) {
-    await performSearch(`${API_BASE}/api/network?artistId=${id}&artist=${encodeURIComponent(name)}`, name);
+    await performSearch(`${API_BASE}/api/network?artistId=${id}&artist=${encodeURIComponent(name)}&hops=${hops}`, name);
   }
 
   // 入力のたびに軽量な候補検索を投げる(300msデバウンス)。
@@ -793,6 +795,29 @@ export default function FeatNetwork(): JSX.Element {
               (全{data.nodes.length}件中{graphData.nodes.length}件を表示)
             </span>
           )}
+
+          <label htmlFor="hops-select" style={{ fontSize: 12, color: "#9C8FA6", marginLeft: 8 }}>
+            hop数
+          </label>
+          <select
+            id="hops-select"
+            value={hops}
+            onChange={(e) => setHops(Number(e.target.value))}
+            title="客演相手の客演相手…と何段階先まで辿るか(次回の検索から反映されます)"
+            style={{
+              padding: "5px 8px",
+              borderRadius: 6,
+              border: "1px solid #3A3244",
+              background: "#1C1620",
+              color: "#F4EFE6",
+              fontSize: 12.5,
+              outline: "none",
+            }}
+          >
+            <option value={1}>1(直接客演のみ)</option>
+            <option value={2}>2</option>
+            <option value={3}>3</option>
+          </select>
         </div>
       </div>
 

@@ -375,8 +375,8 @@ function addCollabEdge(
 }
 
 // 指定アーティストの「feat.表記がある曲」を辿り、共演エッジを collabMap /
-// knownArtists に追記する。センター本人の一次展開と、直接客演相手の
-// 2hop展開の両方から使う共通処理。
+// knownArtists に追記する。センター本人の一次展開と、各hopでの追加展開の
+// 両方から使う共通処理。
 async function collectFeatureEdges(
   artist: GeniusArtistRef,
   collabMap: Map<string, Collab[]>,
@@ -414,42 +414,53 @@ async function collectFeatureEdges(
   return { candidateSongCount: candidateSongs.length, songsWithFeatures };
 }
 
-// 2hop展開の対象を選ぶ基準:センターとの共演曲数(次数)が多い順の上位3組。
+// 各ノードでの展開対象を選ぶ基準:そのノードとの共演曲数(次数)が多い順の上位3組。
 // 1曲のみの相手はノイズになりやすいため対象から除外する。
-const TWO_HOP_TARGET_COUNT = 3;
-const TWO_HOP_MIN_COLLAB_SONGS = 2;
+const HOP_EXPAND_TARGET_COUNT = 3;
+const HOP_EXPAND_MIN_COLLAB_SONGS = 2;
 
-function pickTwoHopTargets(
-  center: GeniusArtistRef,
+// hop数(何段階先の客演相手まで展開するか)の範囲。1 = センターの直接客演相手のみ。
+const MIN_HOPS = 1;
+const MAX_HOPS = 3;
+const DEFAULT_HOPS = 2;
+
+function pickExpansionTargets(
+  parent: GeniusArtistRef,
   collabMap: Map<string, Collab[]>,
-  knownArtists: Map<string, GeniusArtistRef>
+  knownArtists: Map<string, GeniusArtistRef>,
+  expanded: Set<string>
 ): GeniusArtistRef[] {
-  const centerId = String(center.id);
+  const parentId = String(parent.id);
   const candidates: { artist: GeniusArtistRef; count: number }[] = [];
 
   for (const [key, collabs] of collabMap.entries()) {
     const [xId, yId] = key.split("__");
-    if (xId !== centerId && yId !== centerId) continue;
-    const otherId = xId === centerId ? yId : xId;
+    if (xId !== parentId && yId !== parentId) continue;
+    const otherId = xId === parentId ? yId : xId;
+    if (expanded.has(otherId)) continue;
     const other = knownArtists.get(otherId);
     if (!other) continue;
     candidates.push({ artist: other, count: collabs.length });
   }
 
   return candidates
-    .filter((c) => c.count >= TWO_HOP_MIN_COLLAB_SONGS)
+    .filter((c) => c.count >= HOP_EXPAND_MIN_COLLAB_SONGS)
     .sort((a, b) => b.count - a.count)
-    .slice(0, TWO_HOP_TARGET_COUNT)
+    .slice(0, HOP_EXPAND_TARGET_COUNT)
     .map((c) => c.artist);
 }
 
-async function buildNetworkForCenter(center: GeniusArtistRef, requestId?: string) {
+async function buildNetworkForCenter(center: GeniusArtistRef, hops: number, requestId?: string) {
   const startedAt = Date.now();
 
   const knownArtists = new Map<string, GeniusArtistRef>();
   const collabMap = new Map<string, Collab[]>();
+  // 既に collectFeatureEdges 済みのID。複数の親から同じ相手が選ばれた場合の
+  // 二重展開や、循環参照によるループを防ぐ
+  const expanded = new Set<string>();
 
   const centerResult = await collectFeatureEdges(center, collabMap, knownArtists, requestId);
+  expanded.add(String(center.id));
   logInfo("network:songs-collected", {
     requestId,
     centerId: center.id,
@@ -457,15 +468,29 @@ async function buildNetworkForCenter(center: GeniusArtistRef, requestId?: string
     candidateSongs: centerResult.candidateSongCount,
   });
 
-  const twoHopTargets = pickTwoHopTargets(center, collabMap, knownArtists);
-  logInfo("network:2hop-targets", {
-    requestId,
-    targets: twoHopTargets.map((a) => a.name),
-  });
-
-  // Genius側への配慮のため、2hop展開も並列化せず1件ずつ順番に処理する
-  for (const target of twoHopTargets) {
-    await collectFeatureEdges(target, collabMap, knownArtists, requestId);
+  // hop=1(センターの直接客演相手まで)を起点に、指定hop数に達するまで
+  // 「その時点の各ノードで次数上位3組」を1件ずつ順番に(Genius側への配慮のため
+  // 並列化せず)展開していく
+  let frontier: GeniusArtistRef[] = [center];
+  for (let hop = 1; hop < hops && frontier.length > 0; hop++) {
+    const nextFrontier: GeniusArtistRef[] = [];
+    for (const parent of frontier) {
+      const targets = pickExpansionTargets(parent, collabMap, knownArtists, expanded);
+      for (const target of targets) {
+        const targetId = String(target.id);
+        if (expanded.has(targetId)) continue;
+        expanded.add(targetId);
+        await collectFeatureEdges(target, collabMap, knownArtists, requestId);
+        nextFrontier.push(target);
+      }
+    }
+    logInfo("network:hop-expanded", {
+      requestId,
+      hop: hop + 1,
+      expandedCount: nextFrontier.length,
+      targets: nextFrontier.map((a) => a.name),
+    });
+    frontier = nextFrontier;
   }
 
   const allIds = Array.from(knownArtists.keys());
@@ -492,7 +517,7 @@ async function buildNetworkForCenter(center: GeniusArtistRef, requestId?: string
     requestId,
     centerId: center.id,
     centerName: center.name,
-    twoHopTargetCount: twoHopTargets.length,
+    hops,
     nodeCount: nodes.length,
     linkCount: links.length,
     durationMs: Date.now() - startedAt,
@@ -532,6 +557,11 @@ app.get("/api/network", async (req, res) => {
   const artistId = req.query.artistId ? Number(req.query.artistId) : null;
   const artistName = String(req.query.artist ?? "").trim();
 
+  const requestedHops = req.query.hops ? Number(req.query.hops) : DEFAULT_HOPS;
+  const hops = Number.isFinite(requestedHops)
+    ? Math.min(MAX_HOPS, Math.max(MIN_HOPS, Math.trunc(requestedHops)))
+    : DEFAULT_HOPS;
+
   if (!artistId && !artistName) {
     sendError(res, new ApiError("artist または artistId パラメータが必要です", 400), requestId);
     return;
@@ -550,7 +580,7 @@ app.get("/api/network", async (req, res) => {
     if (!center) {
       throw new ApiError(`アーティストが見つかりませんでした: ${artistName}`, 404);
     }
-    const result = await buildNetworkForCenter(center, requestId);
+    const result = await buildNetworkForCenter(center, hops, requestId);
     res.json(result);
   } catch (err) {
     sendError(res, err, requestId);
