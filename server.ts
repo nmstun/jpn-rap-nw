@@ -374,27 +374,24 @@ function addCollabEdge(
   }
 }
 
-async function buildNetworkForCenter(center: GeniusArtistRef, requestId?: string) {
-  const startedAt = Date.now();
-  const allSongs = await getAllArtistSongs(center.id, requestId);
+// 指定アーティストの「feat.表記がある曲」を辿り、共演エッジを collabMap /
+// knownArtists に追記する。センター本人の一次展開と、直接客演相手の
+// 2hop展開の両方から使う共通処理。
+async function collectFeatureEdges(
+  artist: GeniusArtistRef,
+  collabMap: Map<string, Collab[]>,
+  knownArtists: Map<string, GeniusArtistRef>,
+  requestId?: string
+): Promise<{ candidateSongCount: number; songsWithFeatures: number }> {
+  knownArtists.set(String(artist.id), artist);
+
+  const allSongs = await getAllArtistSongs(artist.id, requestId);
 
   // タイトルに feat. 表記がある曲(=客演がいる可能性が高い曲)だけ詳細を取得し、
   // Genius側へのリクエスト数を抑える
   const candidateSongs = allSongs.filter((s) => s.title_with_featured !== s.title);
-  logInfo("network:songs-collected", {
-    requestId,
-    centerId: center.id,
-    centerName: center.name,
-    totalSongs: allSongs.length,
-    candidateSongs: candidateSongs.length,
-  });
 
-  const knownArtists = new Map<string, GeniusArtistRef>();
-  knownArtists.set(String(center.id), center);
-
-  const collabMap = new Map<string, Collab[]>();
   let songsWithFeatures = 0;
-
   for (const summary of candidateSongs) {
     const detail = await getSongDetail(summary.id, requestId);
     await sleep(REQUEST_INTERVAL_MS);
@@ -404,7 +401,7 @@ async function buildNetworkForCenter(center: GeniusArtistRef, requestId?: string
 
     const year = detail.release_date_components?.year ?? 0;
     const song = { title: detail.title, year, url: detail.url };
-    // センター本人 + 曲に載っている客演者、全員の組み合わせにエッジを張る
+    // 曲の名義本人 + 曲に載っている客演者、全員の組み合わせにエッジを張る
     const onTrack: GeniusArtistRef[] = [detail.primary_artist, ...detail.featured_artists];
 
     for (let i = 0; i < onTrack.length; i++) {
@@ -412,6 +409,63 @@ async function buildNetworkForCenter(center: GeniusArtistRef, requestId?: string
         addCollabEdge(collabMap, knownArtists, onTrack[i], onTrack[j], song);
       }
     }
+  }
+
+  return { candidateSongCount: candidateSongs.length, songsWithFeatures };
+}
+
+// 2hop展開の対象を選ぶ基準:センターとの共演曲数(次数)が多い順の上位3組。
+// 1曲のみの相手はノイズになりやすいため対象から除外する。
+const TWO_HOP_TARGET_COUNT = 3;
+const TWO_HOP_MIN_COLLAB_SONGS = 2;
+
+function pickTwoHopTargets(
+  center: GeniusArtistRef,
+  collabMap: Map<string, Collab[]>,
+  knownArtists: Map<string, GeniusArtistRef>
+): GeniusArtistRef[] {
+  const centerId = String(center.id);
+  const candidates: { artist: GeniusArtistRef; count: number }[] = [];
+
+  for (const [key, collabs] of collabMap.entries()) {
+    const [xId, yId] = key.split("__");
+    if (xId !== centerId && yId !== centerId) continue;
+    const otherId = xId === centerId ? yId : xId;
+    const other = knownArtists.get(otherId);
+    if (!other) continue;
+    candidates.push({ artist: other, count: collabs.length });
+  }
+
+  return candidates
+    .filter((c) => c.count >= TWO_HOP_MIN_COLLAB_SONGS)
+    .sort((a, b) => b.count - a.count)
+    .slice(0, TWO_HOP_TARGET_COUNT)
+    .map((c) => c.artist);
+}
+
+async function buildNetworkForCenter(center: GeniusArtistRef, requestId?: string) {
+  const startedAt = Date.now();
+
+  const knownArtists = new Map<string, GeniusArtistRef>();
+  const collabMap = new Map<string, Collab[]>();
+
+  const centerResult = await collectFeatureEdges(center, collabMap, knownArtists, requestId);
+  logInfo("network:songs-collected", {
+    requestId,
+    centerId: center.id,
+    centerName: center.name,
+    candidateSongs: centerResult.candidateSongCount,
+  });
+
+  const twoHopTargets = pickTwoHopTargets(center, collabMap, knownArtists);
+  logInfo("network:2hop-targets", {
+    requestId,
+    targets: twoHopTargets.map((a) => a.name),
+  });
+
+  // Genius側への配慮のため、2hop展開も並列化せず1件ずつ順番に処理する
+  for (const target of twoHopTargets) {
+    await collectFeatureEdges(target, collabMap, knownArtists, requestId);
   }
 
   const allIds = Array.from(knownArtists.keys());
@@ -424,7 +478,7 @@ async function buildNetworkForCenter(center: GeniusArtistRef, requestId?: string
       name: info.name,
       group: info.is_verified ? "認証アーティスト" : "アーティスト",
       bio: info.url ? `Geniusページ: ${info.url}` : "",
-      releases: isCenter ? candidateSongs.length : 0,
+      releases: isCenter ? centerResult.candidateSongCount : 0,
       isCenter,
     };
   });
@@ -438,7 +492,7 @@ async function buildNetworkForCenter(center: GeniusArtistRef, requestId?: string
     requestId,
     centerId: center.id,
     centerName: center.name,
-    songsWithFeatures,
+    twoHopTargetCount: twoHopTargets.length,
     nodeCount: nodes.length,
     linkCount: links.length,
     durationMs: Date.now() - startedAt,
