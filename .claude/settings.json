@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "if": "Bash(git commit*)",
+            "command": "cmd=$(cat | jq -r '.tool_input.command // empty')\ncase \"$cmd\" in\n  *\"git commit\"*) ;;\n  *) exit 0 ;;\nesac\nroot=$(git rev-parse --show-toplevel 2>/dev/null)\n[ -z \"$root\" ] && exit 0\ncd \"$root\" || exit 0\nstaged_src=$(git diff --cached --name-only -- src/)\n[ -z \"$staged_src\" ] && exit 0\nver_diff=$(git diff --cached -- package.json | grep -E '^[+-].*\"version\"[[:space:]]*:')\nif [ -z \"$ver_diff\" ]; then\n  jq -n '{hookSpecificOutput:{hookEventName:\"PreToolUse\",permissionDecision:\"deny\",permissionDecisionReason:\"src/配下の変更をコミットしようとしていますが、package.jsonのversionが上がっていません。不具合修正でもパッチバージョンを上げる運用です（CLAUDE.md参照）。バージョンを上げてから同じコミットに含めてください。\"}}'\nfi\nexit 0",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}
