@@ -117,13 +117,18 @@ Renovate（`renovate.json`）により、依存パッケージの更新PRが週�
   - `src/main.tsx`, `src/App.tsx` — アプリエントリ
 - アプリアイコン
   - `public/favicon.svg` — 中心アーティストから客演相手へ広がる相関ネットワークを描いたアイコン（暗紫の地に紫 `#a78bfa` × シアン `#22d3ee`）。Vite のデフォルトから差し替え済み
-  - `public/apple-touch-icon.png`（180px）、`public/icon-192.png`、`public/icon-512.png` は `favicon.svg` から `rsvg-convert` で書き出している。図形を変えるときは SVG 側だけを直し、以下で PNG を作り直す
+  - `public/favicon.ico` と `public/favicon-32.png` — **Safari は `rel="icon"` の SVG を使わない**ため、SVG だけ置くと Safari のタブが空になる。ico と PNG を併せて置き、`index.html` で ico → PNG → SVG の順に宣言している
+  - 上記以外はすべて `favicon.svg` から書き出している。図形を変えるときは SVG 側だけを直し、以下で残りを作り直す
 
     ```sh
     rsvg-convert -w 180 -h 180 public/favicon.svg -o public/apple-touch-icon.png
+    rsvg-convert -w  32 -h  32 public/favicon.svg -o public/favicon-32.png
     rsvg-convert -w 192 -h 192 public/favicon.svg -o public/icon-192.png
     rsvg-convert -w 512 -h 512 public/favicon.svg -o public/icon-512.png
+    node scripts/make-favicon-ico.mjs public/favicon.svg public/favicon.ico
     ```
+
+  - [`scripts/make-favicon-ico.mjs`](./scripts/make-favicon-ico.mjs) — ico の生成スクリプト。ico の中身は BMP ではなく PNG をそのまま詰めており、その PNG は RGBA にしてある（`rsvg-convert` は全ピクセルが不透明だと RGB で書き出すが、RGB の PNG を入れた ico を受け付けないデコーダーがあるため）
 
   - `public/manifest.webmanifest` — ホーム画面に追加したときの名称とアイコン。`index.html` から `link` タグで参照している
   - `index.html` の `link` タグには `?v=2` を付けている。ファビコンはブラウザが通常のHTTPキャッシュ制御とは別の仕組みで保持しており、`Cache-Control: must-revalidate` を返してもリロードでは差し替わらない。URLが変わらないと古い絵柄が出続けるため、**絵柄を変えたらこの番号も上げること**
