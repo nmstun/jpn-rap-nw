@@ -1,0 +1,12 @@
+{
+  "name": "日本語ラップ フィーチャリング相関図",
+  "short_name": "ラップ相関図",
+  "description": "Genius APIを使って日本語ラップの客演ネットワークを可視化するアプリ",
+  "start_url": "/",
+  "theme_color": "#14101f",
+  "background_color": "#14101f",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}

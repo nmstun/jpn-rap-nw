@@ -115,6 +115,17 @@ Renovate（`renovate.json`）により、依存パッケージの更新PRが週�
   - `server.ts` — バックエンド API エントリポイント
   - `src/feat-network.tsx` — 可視化 UI と検索ロジック
   - `src/main.tsx`, `src/App.tsx` — アプリエントリ
+- アプリアイコン
+  - `public/favicon.svg` — 中心アーティストから客演相手へ広がる相関ネットワークを描いたアイコン（暗紫の地に紫 `#a78bfa` × シアン `#22d3ee`）。Vite のデフォルトから差し替え済み
+  - `public/apple-touch-icon.png`（180px）、`public/icon-192.png`、`public/icon-512.png` は `favicon.svg` から `rsvg-convert` で書き出している。図形を変えるときは SVG 側だけを直し、以下で PNG を作り直す
+
+    ```sh
+    rsvg-convert -w 180 -h 180 public/favicon.svg -o public/apple-touch-icon.png
+    rsvg-convert -w 192 -h 192 public/favicon.svg -o public/icon-192.png
+    rsvg-convert -w 512 -h 512 public/favicon.svg -o public/icon-512.png
+    ```
+
+  - `public/manifest.webmanifest` — ホーム画面に追加したときの名称とアイコン。`index.html` から `link` タグで参照している
 
 ## 改善案 / TODO
 - プレビュードメインの扱いを簡略化するためのロジック追加（例: `.vercel.app` 緩和）
