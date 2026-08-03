@@ -126,6 +126,7 @@ Renovate（`renovate.json`）により、依存パッケージの更新PRが週�
     ```
 
   - `public/manifest.webmanifest` — ホーム画面に追加したときの名称とアイコン。`index.html` から `link` タグで参照している
+  - `index.html` の `link` タグには `?v=2` を付けている。ファビコンはブラウザが通常のHTTPキャッシュ制御とは別の仕組みで保持しており、`Cache-Control: must-revalidate` を返してもリロードでは差し替わらない。URLが変わらないと古い絵柄が出続けるため、**絵柄を変えたらこの番号も上げること**
 
 ## 改善案 / TODO
 - プレビュードメインの扱いを簡略化するためのロジック追加（例: `.vercel.app` 緩和）
