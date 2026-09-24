@@ -13,7 +13,9 @@
  * 4. npm install express cors pino
  *    npm install -D @types/express @types/cors tsx dotenv
  * 5. 実行: npx tsx server.ts
- * → http://localhost:3001/api/network?artist=名前 でネットワーク構築
+ * → POST http://localhost:3001/api/network?artist=名前 でジョブを開始({ jobId } を返す)
+ * → GET  http://localhost:3001/api/network/:jobId でポーリング(status/progress/result)
+ * → POST http://localhost:3001/api/network/:jobId/cancel でキャンセル
  * → http://localhost:3001/api/search-artist?q=名前 で候補検索(軽量・高速)
  *
  * ── データの拾い方について ──────────────────────────────────
@@ -395,11 +397,13 @@ async function collectFeatureEdges(
   artist: GeniusArtistRef,
   collabMap: Map<string, Collab[]>,
   knownArtists: Map<string, GeniusArtistRef>,
-  requestId?: string
+  requestId?: string,
+  job?: Job
 ): Promise<{ candidateSongCount: number; songsWithFeatures: number }> {
   knownArtists.set(String(artist.id), artist);
 
   const allSongs = await getAllArtistSongs(artist.id, requestId);
+  if (job) assertNotCancelled(job);
 
   // タイトルに feat. 表記がある曲(=客演がいる可能性が高い曲)だけ詳細を取得し、
   // Genius側へのリクエスト数を抑える
@@ -407,6 +411,7 @@ async function collectFeatureEdges(
 
   let songsWithFeatures = 0;
   for (const summary of candidateSongs) {
+    if (job) assertNotCancelled(job);
     const detail = await getSongDetail(summary.id, requestId);
     await sleep(REQUEST_INTERVAL_MS);
 
@@ -438,6 +443,62 @@ const MIN_HOPS = 1;
 const MAX_HOPS = 3;
 const DEFAULT_HOPS = 2;
 
+// =============================================================================
+// ジョブ管理(長時間処理のワーカー化)
+// ネットワーク構築は客演の多いアーティストで数分かかることがあり、Render/ブラウザの
+// HTTPタイムアウトに当たりうる。そのため /api/network は即座にジョブIDを返し、
+// 実際の構築はバックグラウンドで進める。フロントは /api/network/:jobId を
+// ポーリングして進捗・結果を受け取る。
+// Renderは基本1インスタンス構成のため、ジョブの保持はプロセス内メモリで十分と
+// 判断している(複数インスタンスに展開する場合は外部ストア(Redis等)への
+// 置き換えが必要)。
+// =============================================================================
+type JobStatus = "pending" | "running" | "done" | "error" | "cancelled";
+
+interface JobProgress {
+  hop: number;
+  totalHops: number;
+  expandedArtists: number;
+}
+
+interface Job {
+  id: string;
+  status: JobStatus;
+  createdAt: number;
+  updatedAt: number;
+  cancelled: boolean;
+  progress: JobProgress;
+  result?: { nodes: NetworkNode[]; links: NetworkLink[]; centerId: string };
+  error?: { message: string; status: number };
+}
+
+const jobs = new Map<string, Job>();
+
+// 完了/失敗/キャンセル後もしばらくは結果をポーリングできるよう残すが、
+// メモリを無制限に太らせないよう一定時間で破棄する
+const JOB_TTL_MS = 10 * 60 * 1000; // 10分
+const JOB_CLEANUP_INTERVAL_MS = 60 * 1000;
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, job] of jobs.entries()) {
+    if (now - job.updatedAt > JOB_TTL_MS) jobs.delete(id);
+  }
+}, JOB_CLEANUP_INTERVAL_MS).unref();
+
+class JobCancelledError extends Error {
+  constructor() {
+    super("ジョブがキャンセルされました");
+  }
+}
+
+function touchJob(job: Job) {
+  job.updatedAt = Date.now();
+}
+
+function assertNotCancelled(job: Job) {
+  if (job.cancelled) throw new JobCancelledError();
+}
+
 function pickExpansionTargets(
   parent: GeniusArtistRef,
   collabMap: Map<string, Collab[]>,
@@ -464,7 +525,7 @@ function pickExpansionTargets(
     .map((c) => c.artist);
 }
 
-async function buildNetworkForCenter(center: GeniusArtistRef, hops: number, requestId?: string) {
+async function buildNetworkForCenter(center: GeniusArtistRef, hops: number, requestId?: string, job?: Job) {
   const startedAt = Date.now();
 
   const knownArtists = new Map<string, GeniusArtistRef>();
@@ -473,8 +534,12 @@ async function buildNetworkForCenter(center: GeniusArtistRef, hops: number, requ
   // 二重展開や、循環参照によるループを防ぐ
   const expanded = new Set<string>();
 
-  const centerResult = await collectFeatureEdges(center, collabMap, knownArtists, requestId);
+  const centerResult = await collectFeatureEdges(center, collabMap, knownArtists, requestId, job);
   expanded.add(String(center.id));
+  if (job) {
+    job.progress = { hop: 1, totalHops: hops, expandedArtists: expanded.size };
+    touchJob(job);
+  }
   logInfo("network:songs-collected", {
     requestId,
     centerId: center.id,
@@ -487,16 +552,22 @@ async function buildNetworkForCenter(center: GeniusArtistRef, hops: number, requ
   // 並列化せず)展開していく
   let frontier: GeniusArtistRef[] = [center];
   for (let hop = 1; hop < hops && frontier.length > 0; hop++) {
+    if (job) assertNotCancelled(job);
     const nextFrontier: GeniusArtistRef[] = [];
     for (const parent of frontier) {
       const targets = pickExpansionTargets(parent, collabMap, knownArtists, expanded);
       for (const target of targets) {
+        if (job) assertNotCancelled(job);
         const targetId = String(target.id);
         if (expanded.has(targetId)) continue;
         expanded.add(targetId);
-        await collectFeatureEdges(target, collabMap, knownArtists, requestId);
+        await collectFeatureEdges(target, collabMap, knownArtists, requestId, job);
         nextFrontier.push(target);
       }
+    }
+    if (job) {
+      job.progress = { hop: hop + 1, totalHops: hops, expandedArtists: expanded.size };
+      touchJob(job);
     }
     logInfo("network:hop-expanded", {
       requestId,
@@ -566,7 +637,37 @@ app.get("/api/search-artist", async (req, res) => {
   }
 });
 
-app.get("/api/network", async (req, res) => {
+// バックグラウンドでジョブを実行し、完了/失敗/キャンセルをjobに反映する。
+// 呼び出し側(POST /api/network)はこの完了を待たずに202を返す。
+function runNetworkJob(job: Job, center: GeniusArtistRef, hops: number, requestId: string) {
+  job.status = "running";
+  touchJob(job);
+  buildNetworkForCenter(center, hops, requestId, job)
+    .then((result) => {
+      if (job.cancelled) {
+        job.status = "cancelled";
+      } else {
+        job.result = result;
+        job.status = "done";
+      }
+      touchJob(job);
+    })
+    .catch((err) => {
+      if (err instanceof JobCancelledError) {
+        job.status = "cancelled";
+        touchJob(job);
+        return;
+      }
+      const e = err instanceof ApiError ? err : new ApiError(err instanceof Error ? err.message : String(err), 500);
+      logError("job:error", { requestId, jobId: job.id, status: e.status, message: e.message });
+      job.error = { message: e.message, status: e.status };
+      job.status = "error";
+      touchJob(job);
+    });
+}
+
+// ネットワーク構築を開始し、即座にjobIdを返す(202)。実際の構築はバックグラウンドで進む。
+app.post("/api/network", async (req, res) => {
   const requestId = req.requestId;
   const artistId = req.query.artistId ? Number(req.query.artistId) : null;
   const artistName = String(req.query.artist ?? "").trim();
@@ -594,11 +695,52 @@ app.get("/api/network", async (req, res) => {
     if (!center) {
       throw new ApiError(`アーティストが見つかりませんでした: ${artistName}`, 404);
     }
-    const result = await buildNetworkForCenter(center, hops, requestId);
-    res.json(result);
+
+    const jobId = randomUUID();
+    const job: Job = {
+      id: jobId,
+      status: "pending",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      cancelled: false,
+      progress: { hop: 0, totalHops: hops, expandedArtists: 0 },
+    };
+    jobs.set(jobId, job);
+    logInfo("job:created", { requestId, jobId, centerName: center.name, hops });
+
+    runNetworkJob(job, center, hops, requestId);
+
+    res.status(202).json({ jobId });
   } catch (err) {
     sendError(res, err, requestId);
   }
+});
+
+// ポーリング用: ジョブの現在の状態・進捗を返す。完了時のみ result を含む
+app.get("/api/network/:jobId", (req, res) => {
+  const job = jobs.get(req.params.jobId);
+  if (!job) {
+    res.status(404).json({ error: "ジョブが見つかりません(期限切れの可能性があります)" });
+    return;
+  }
+  res.json({
+    status: job.status,
+    progress: job.progress,
+    result: job.status === "done" ? job.result : undefined,
+    error: job.status === "error" ? job.error : undefined,
+  });
+});
+
+// キャンセル用: cancelled フラグを立て、ジョブ側の次のチェックポイントで早期終了させる
+app.post("/api/network/:jobId/cancel", (req, res) => {
+  const job = jobs.get(req.params.jobId);
+  if (!job) {
+    res.status(404).json({ error: "ジョブが見つかりません" });
+    return;
+  }
+  job.cancelled = true;
+  touchJob(job);
+  res.json({ status: "cancelling" });
 });
 
 // =============================================================================

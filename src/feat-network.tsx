@@ -45,6 +45,13 @@ interface SearchCandidate {
   isVerified: boolean;
 }
 
+// ジョブの進捗(何hop目まで展開済みか)
+interface JobProgress {
+  hop: number;
+  totalHops: number;
+  expandedArtists: number;
+}
+
 // APIサーバー(server.ts)のベースURL。Viteのビルド時に環境変数から注入する
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? "http://localhost:3001").replace(/\/$/, "");
 
@@ -114,6 +121,8 @@ export default function FeatNetwork(): JSX.Element {
   const [errorMsg, setErrorMsg] = useState("");
   // 現在(再)検索中のアーティスト名。ローディング表示に使う
   const [searchingName, setSearchingName] = useState("");
+  // 実行中のジョブの進捗(ポーリングで取得)
+  const [progress, setProgress] = useState<JobProgress | null>(null);
   // フィーチャリング相手リストで「曲一覧」をドリルダウン表示中のノードID
   const [expandedCollabId, setExpandedCollabId] = useState<string | null>(null);
 
@@ -123,6 +132,8 @@ export default function FeatNetwork(): JSX.Element {
   const [candidatesLoading, setCandidatesLoading] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
+  // ポーリング中のジョブID。キャンセル時にバックエンドへcancelを通知するのに使う
+  const activeJobIdRef = useRef<string | null>(null);
   // 日本語入力(IME)の変換中かどうか。変換確定のEnterと検索実行のEnterを区別するために使う
   const [isComposing, setIsComposing] = useState(false);
   const [isMobile, setIsMobile] = useState(() => (typeof window !== "undefined" ? window.innerWidth < 900 : false));
@@ -134,27 +145,50 @@ export default function FeatNetwork(): JSX.Element {
   const linkSelRef = useRef<d3.Selection<SVGLineElement, SimLink, SVGGElement, unknown> | null>(null);
   const linksDataRef = useRef<SimLink[]>([]);
 
+  // ポーリング間隔。短すぎるとRender側への負荷が増え、長すぎると
+  // キャンセル・完了の反映が遅れて見えるので1秒に設定
+  const POLL_INTERVAL_MS = 1000;
+
+  function notifyBackendCancel(jobId: string) {
+    // 応答を待つ必要はない(失敗してもJOB_TTL_MSで自然に破棄される)ので投げっぱなしにする
+    fetch(`${API_BASE}/api/network/${jobId}/cancel`, { method: "POST" }).catch(() => {});
+  }
+
   function cancelActiveSearch() {
     abortControllerRef.current?.abort();
     abortControllerRef.current = null;
+    if (activeJobIdRef.current) {
+      notifyBackendCancel(activeJobIdRef.current);
+      activeJobIdRef.current = null;
+    }
     setStatus("idle");
     setSearchingName("");
     setErrorMsg("");
+    setProgress(null);
   }
 
   useEffect(() => {
     return () => {
       abortControllerRef.current?.abort();
       abortControllerRef.current = null;
+      // アンマウント時もバックエンドのジョブを止めておく(結果を誰も見なくなるため)
+      if (activeJobIdRef.current) {
+        notifyBackendCancel(activeJobIdRef.current);
+        activeJobIdRef.current = null;
+      }
     };
   }, []);
 
   // runSearch(名前で検索) と runSearchById(候補選択で検索) は、状態リセットと
-  // フェッチ結果のハンドリングがほぼ同一なので共通化する。違うのはURLだけ。
+  // ジョブ開始・ポーリングのハンドリングがほぼ同一なので共通化する。違うのはURLだけ。
+  // ネットワーク構築は長時間かかりうるため、POSTでジョブを開始して jobId を受け取り、
+  // GET /api/network/:jobId をポーリングして進捗・結果を取得する(同期リクエストで
+  // 待つ方式だとRender/ブラウザ側のHTTPタイムアウトに当たりうるため)。
   async function performSearch(url: string, displayName: string) {
     abortControllerRef.current?.abort();
     const controller = new AbortController();
     abortControllerRef.current = controller;
+    activeJobIdRef.current = null;
 
     setStatus("loading");
     setErrorMsg("");
@@ -162,15 +196,48 @@ export default function FeatNetwork(): JSX.Element {
     setHoveredLink(null);
     setExpandedCollabId(null);
     setSearchingName(displayName);
+    setProgress(null);
     setData(null); // 検索開始と同時に前回のグラフを消す
     setShowCandidates(false);
     try {
-      const res = await fetch(url, { signal: controller.signal });
-      const json = await res.json();
+      const startRes = await fetch(url, { method: "POST", signal: controller.signal });
+      const startJson = await startRes.json();
       if (controller.signal.aborted) return;
-      if (!res.ok) throw new Error(json.error ?? `取得に失敗しました (${res.status})`);
-      setData(json as NetworkResponse);
-      setStatus("ready");
+      if (!startRes.ok) throw new Error(startJson.error ?? `開始に失敗しました (${startRes.status})`);
+      const jobId = startJson.jobId as string;
+      activeJobIdRef.current = jobId;
+
+      // 完了/失敗/キャンセルのいずれかになるまでポーリングする
+      for (;;) {
+        if (controller.signal.aborted) return;
+        await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+        if (controller.signal.aborted) return;
+
+        const pollRes = await fetch(`${API_BASE}/api/network/${jobId}`, { signal: controller.signal });
+        const pollJson = await pollRes.json();
+        if (controller.signal.aborted) return;
+        if (!pollRes.ok) throw new Error(pollJson.error ?? `状態取得に失敗しました (${pollRes.status})`);
+
+        if (pollJson.status === "done") {
+          setData(pollJson.result as NetworkResponse);
+          setStatus("ready");
+          activeJobIdRef.current = null;
+          return;
+        }
+        if (pollJson.status === "error") {
+          throw new Error(pollJson.error?.message ?? "ネットワーク構築に失敗しました");
+        }
+        if (pollJson.status === "cancelled") {
+          // cancelActiveSearch側で既にidleへ戻している想定(サーバー側から先に
+          // キャンセルされた場合の保険としてここでも状態を戻す)
+          activeJobIdRef.current = null;
+          setStatus("idle");
+          return;
+        }
+        if (pollJson.progress) {
+          setProgress(pollJson.progress as JobProgress);
+        }
+      }
     } catch (err) {
       if (controller.signal.aborted) {
         return;
@@ -179,6 +246,7 @@ export default function FeatNetwork(): JSX.Element {
       console.error("[feat-network] search failed:", message);
       setErrorMsg(message);
       setStatus("error");
+      activeJobIdRef.current = null;
     } finally {
       if (abortControllerRef.current === controller) {
         abortControllerRef.current = null;
@@ -942,6 +1010,14 @@ export default function FeatNetwork(): JSX.Element {
           {status === "loading" && (
             <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", color: "#9088A0", fontSize: 13.5, textAlign: "center", padding: 24 }}>
               『{searchingName}』を検索中…(Geniusからデータを取得中。客演の多いアーティストは少し時間がかかります)
+              {progress && progress.hop > 0 && (
+                <>
+                  <br />
+                  <span style={{ fontSize: 12 }}>
+                    hop {progress.hop}/{progress.totalHops} ・ {progress.expandedArtists}組を展開済み
+                  </span>
+                </>
+              )}
             </div>
           )}
           {status === "error" && (
