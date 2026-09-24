@@ -1,7 +1,7 @@
 {
   "name": "jpn-rap-nw",
   "private": true,
-  "version": "0.1.3",
+  "version": "0.1.4",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -14,6 +14,7 @@
     "cors": "^2.8.6",
     "d3": "^7.9.0",
     "express": "^5.2.1",
+    "pino": "^10.3.1",
     "react": "^19.2.7",
     "react-dom": "^19.2.7"
   },

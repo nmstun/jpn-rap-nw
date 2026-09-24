@@ -10,7 +10,7 @@
  * 3. .env に以下を設定
  *      GENIUS_ACCESS_TOKEN=xxxx
  *      LOG_LEVEL=info        # 省略可。debug / info / warn / error
- * 4. npm install express cors
+ * 4. npm install express cors pino
  *    npm install -D @types/express @types/cors tsx dotenv
  * 5. 実行: npx tsx server.ts
  * → http://localhost:3001/api/network?artist=名前 でネットワーク構築
@@ -33,6 +33,7 @@
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
+import pino from "pino";
 import { randomUUID } from "crypto";
 
 const app = express();
@@ -79,30 +80,33 @@ const REQUEST_INTERVAL_MS = 120;
 
 // =============================================================================
 // ロギング
-// 外部ロギングライブラリ(pino/winstonなど)を導入するほどの規模ではないため、
-// タイムスタンプ・レベル・リクエストID付きの軽量ロガーを自前で用意する。
-// 本格的な本番運用(複数インスタンス・ログ集約基盤への転送など)をする場合は
-// pino + 外部ログ収集サービスへの置き換えを推奨。
+// pinoで構造化ログ(JSON行)を標準出力へ出力する。集約先はRenderの標準ログ画面で
+// 十分と判断しているため、外部ログ集約サービスへの転送(transport)は導入していない。
 // =============================================================================
 type LogLevel = "debug" | "info" | "warn" | "error";
-const LOG_LEVEL_ORDER: Record<LogLevel, number> = { debug: 0, info: 1, warn: 2, error: 3 };
 const CURRENT_LOG_LEVEL: LogLevel = (process.env.LOG_LEVEL as LogLevel) ?? "info";
 
-function log(level: LogLevel, message: string, meta?: Record<string, unknown>) {
-  if (LOG_LEVEL_ORDER[level] < LOG_LEVEL_ORDER[CURRENT_LOG_LEVEL]) return;
-  const line = {
-    time: new Date().toISOString(),
-    level,
-    message,
-    ...(meta ?? {}),
-  };
-  const out = level === "error" ? console.error : level === "warn" ? console.warn : console.log;
-  out(JSON.stringify(line));
+const logger = pino({
+  level: CURRENT_LOG_LEVEL,
+  timestamp: pino.stdTimeFunctions.isoTime,
+  // 以前の自前ロガーとキー名を揃える(time/level/msgは pino の既定キーをそのまま使用)
+  formatters: {
+    level: (label) => ({ level: label }),
+  },
+});
+
+function logDebug(message: string, meta?: Record<string, unknown>) {
+  logger.debug(meta ?? {}, message);
 }
-const logDebug = (message: string, meta?: Record<string, unknown>) => log("debug", message, meta);
-const logInfo = (message: string, meta?: Record<string, unknown>) => log("info", message, meta);
-const logWarn = (message: string, meta?: Record<string, unknown>) => log("warn", message, meta);
-const logError = (message: string, meta?: Record<string, unknown>) => log("error", message, meta);
+function logInfo(message: string, meta?: Record<string, unknown>) {
+  logger.info(meta ?? {}, message);
+}
+function logWarn(message: string, meta?: Record<string, unknown>) {
+  logger.warn(meta ?? {}, message);
+}
+function logError(message: string, meta?: Record<string, unknown>) {
+  logger.error(meta ?? {}, message);
+}
 
 // リクエストごとにIDを振り、複数ログ行を追跡できるようにする
 declare global {
