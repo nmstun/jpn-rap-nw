@@ -42,6 +42,12 @@ const CORS_ALLOWED_ORIGINS = (process.env.CORS_ALLOWED_ORIGINS ?? "http://localh
   .map((origin) => origin.trim())
   .filter(Boolean);
 
+// Vercelのプレビューデプロイは `<project>-<hash>-<team>.vercel.app` のように
+// サブドメインがデプロイのたびに変わるため、CORS_ALLOWED_ORIGINS への都度追加が
+// 現実的でない。true の場合のみ `.vercel.app` オリジンを一括許可する
+// (本番の取り違えを避けるため、明示的に opt-in させる。デフォルトは false)。
+const CORS_ALLOW_VERCEL_PREVIEWS = process.env.CORS_ALLOW_VERCEL_PREVIEWS === "true";
+
 app.use(
   cors({
     origin: (origin, callback) => {
@@ -50,6 +56,10 @@ app.use(
         return;
       }
       if (CORS_ALLOWED_ORIGINS.includes(origin)) {
+        callback(null, true);
+        return;
+      }
+      if (CORS_ALLOW_VERCEL_PREVIEWS && /^https:\/\/[a-z0-9-]+\.vercel\.app$/.test(origin)) {
         callback(null, true);
         return;
       }

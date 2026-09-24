@@ -70,6 +70,8 @@ npx tsx server.ts
 CORS_ALLOWED_ORIGINS=https://vercel.com/nanastun/jpn-rap-nw
 ```
 
+- `CORS_ALLOW_VERCEL_PREVIEWS` — `true`にすると`*.vercel.app`のオリジンを一括許可します（プレビューデプロイ用。サブドメインがデプロイのたびに変わるため、`CORS_ALLOWED_ORIGINS`への都度追加が不要になります）。本番では`false`推奨（デフォルト）
+
 - フロント環境変数（Vercel）: `VITE_API_BASE_URL=https://jpn-rap-nw.onrender.com`
 
 `.env.example` にサンプルがあるので、それをコピーして値を設定してください。
@@ -79,7 +81,7 @@ CORS_ALLOWED_ORIGINS=https://vercel.com/nanastun/jpn-rap-nw
 2. 環境変数に `VITE_API_BASE_URL` を追加（値: `https://jpn-rap-nw.onrender.com`）
 3. デプロイ実行
 
-注意: Vercel プレビューはサブドメインが頻繁に変わるため、プレビューからバックエンドにアクセスする場合は Render 側の `CORS_ALLOWED_ORIGINS` に該当プレビュードメインを追加してください。
+注意: Vercel プレビューはサブドメインが頻繁に変わるため、プレビューからバックエンドにアクセスする場合は Render 側で `CORS_ALLOW_VERCEL_PREVIEWS=true` を設定してください。
 
 ## バックエンドのデプロイ（Render）
 1. Render の Web Service を作成し、リポジトリを接続
@@ -87,12 +89,13 @@ CORS_ALLOWED_ORIGINS=https://vercel.com/nanastun/jpn-rap-nw
 3. Start コマンド: `npx tsx server.ts`
 4. 環境変数を設定
    - `GENIUS_ACCESS_TOKEN`
-   - `CORS_ALLOWED_ORIGINS=https://vercel.com/nanastun/jpn-rap-nw`（必要に応じてプレビュー用ドメインを追加）
+   - `CORS_ALLOWED_ORIGINS=https://vercel.com/nanastun/jpn-rap-nw`
+   - `CORS_ALLOW_VERCEL_PREVIEWS=true`（プレビューデプロイからアクセスする場合）
 5. デプロイ/再起動
 
 ## CORS とセキュリティ注意点
 - `CORS_ALLOWED_ORIGINS` はオリジン（スキーム + ドメイン）のみ指定します。ポートは不要です。
-- 開発やプレビューでサブドメインが変わる場合、`origin.endsWith('.vercel.app')` のような緩和を検討できます（セキュリティリスクを理解した上で）。
+- 開発やプレビューでサブドメインが変わる場合は `CORS_ALLOW_VERCEL_PREVIEWS=true` を使ってください（セキュリティリスクを理解した上で、本番では既定の`false`のままにすることを推奨）。
 - `GENIUS_ACCESS_TOKEN` は機密情報です。Render のシークレット機能を使って保存してください。
 
 ## 長時間処理の扱い（キャンセル方法）
@@ -134,7 +137,6 @@ Renovate（`renovate.json`）により、依存パッケージの更新PRが週�
   - `index.html` の `link` タグには `?v=2` を付けている。ファビコンはブラウザが通常のHTTPキャッシュ制御とは別の仕組みで保持しており、`Cache-Control: must-revalidate` を返してもリロードでは差し替わらない。URLが変わらないと古い絵柄が出続けるため、**絵柄を変えたらこの番号も上げること**
 
 ## 改善案 / TODO
-- プレビュードメインの扱いを簡略化するためのロジック追加（例: `.vercel.app` 緩和）
 - 長時間処理のワーカー化とジョブ管理
 - ログ集約（pino など）
 
